@@ -1449,6 +1449,7 @@ public class PlayerControllerAi extends PlayerController {
     public Map<DeckSection, List<? extends PaperCard>> complainCardsCantPlayWell(Deck myDeck) {
         // TODO check if profile detection set to Auto
         setupAutoProfile(myDeck);
+        LlmAssist.gameStarting(player);
 
         return brains.complainCardsCantPlayWell(myDeck);
     }

@@ -12,6 +12,10 @@ import org.testng.annotations.Test;
 import forge.ai.AITest;
 import forge.ai.AiProps;
 import forge.ai.LobbyPlayerAi;
+import forge.deck.Deck;
+import forge.deck.DeckSection;
+import forge.item.PaperCard;
+import forge.model.FModel;
 import forge.game.Game;
 import forge.game.card.Card;
 import forge.game.phase.PhaseType;
@@ -34,6 +38,7 @@ public class LlmAssistTest extends AITest {
         final List<String> questions = new ArrayList<>();
         final List<String> states = new ArrayList<>();
         int answer;
+        double confidence = 0.9;
 
         FakeProvider(int answer) {
             this.answer = answer;
@@ -51,7 +56,7 @@ public class LlmAssistTest extends AITest {
             if (answer < 0) {
                 throw new LlmException("simulated timeout");
             }
-            return new LlmAnswer(Math.min(answer, options.size() - 1), 0.9, "test", 100, 5);
+            return new LlmAnswer(Math.min(answer, options.size() - 1), confidence, "test", 100, 5);
         }
     }
 
@@ -152,5 +157,47 @@ public class LlmAssistTest extends AITest {
         AssertJUnit.assertTrue(state.contains("Your hand: Counterspell"));
         AssertJUnit.assertTrue(state.contains("Grizzly Bears 2/2"));
         AssertJUnit.assertTrue("focus cards include oracle text", state.contains("Card text for this decision"));
+    }
+
+    @Test
+    public void lowConfidenceKeepsStandardAiPick() {
+        FakeProvider provider = new FakeProvider(1);
+        provider.confidence = 0.2; // below LLM_MIN_CONFIDENCE_PCT=35
+        setUpGame("LlmAssisted", 13, provider);
+        int pick = LlmGate.ask(ai, AiProps.LLM_HOOK_TARGETS, "test", "testing", "q", List.of("a", "b"), List.of(), 0, "low");
+        AssertJUnit.assertEquals("unsure model must not overrule the standard AI", 0, pick);
+
+        provider.confidence = 0.8;
+        pick = LlmGate.ask(ai, AiProps.LLM_HOOK_TARGETS, "test", "testing", "q", List.of("a", "b"), List.of(), 0, "high");
+        AssertJUnit.assertEquals(1, pick);
+
+        provider.confidence = 0.1;
+        pick = LlmGate.ask(ai, AiProps.LLM_HOOK_TARGETS, "test", "testing", "q", List.of("a", "b"), List.of(), -1, "nohint");
+        AssertJUnit.assertEquals("no standard pick to fall back to", 1, pick);
+    }
+
+    @Test
+    public void plannerUsesCachedPlanFileWithoutCallingModel() throws Exception {
+        File dir = java.nio.file.Files.createTempDirectory("llm-plans").toFile();
+        System.setProperty("forge.llm.plans", dir.getAbsolutePath());
+        try {
+            Deck deck = new Deck("Test Dragons");
+            for (String name : List.of("Sol Ring", "Shivan Dragon", "Mountain")) {
+                PaperCard c = FModel.getMagicDb().getCommonCards().getCard(name);
+                deck.getOrCreate(DeckSection.Main).add(c);
+            }
+            String hash = GamePlanner.hash(deck);
+            File file = new File(dir, "Test Dragons-" + hash + ".json");
+            java.nio.file.Files.writeString(file.toPath(), "{\"archetype\":\"Dragons\",\"summary\":\"Ramp then dragons.\","
+                    + "\"holdCards\":[{\"card\":\"Shivan Dragon\",\"castWhen\":\"an opponent is tapped out\"}]}");
+
+            // a model call would fail: no DEEPSEEK key is needed when the cached file exists
+            GamePlan plan = GamePlanner.load(deck, "Test Dragons", hash, "unused", 1000);
+            AssertJUnit.assertNotNull(plan);
+            AssertJUnit.assertEquals("an opponent is tapped out", plan.holdCondition("Shivan Dragon"));
+            AssertJUnit.assertTrue(GamePlanner.describeDeck(deck, "Test Dragons").contains("Shivan Dragon |"));
+        } finally {
+            System.clearProperty("forge.llm.plans");
+        }
     }
 }

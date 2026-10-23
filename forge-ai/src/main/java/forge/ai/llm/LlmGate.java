@@ -60,7 +60,8 @@ public final class LlmGate {
             return false;
         }
         Game game = ai.getGame();
-        if (hook != AiProps.LLM_HOOK_MULLIGAN
+        // mulligans and holding back payoffs matter from the very start, the rest only from LLM_MIN_ROUND
+        if (hook != AiProps.LLM_HOOK_MULLIGAN && hook != AiProps.LLM_HOOK_HOLD
                 && StateSerializer.round(game) < AiProfileUtil.getIntProperty(ai, AiProps.LLM_MIN_ROUND)) {
             return false;
         }
@@ -135,15 +136,25 @@ public final class LlmGate {
             LlmStatus.fireFinished(who, "AI assist unavailable (" + error + "), using standard AI", elapsed);
             return -1;
         }
-        synchronized (b) {
-            b.cache.put(who + "|" + cacheKey, answer.index());
+        // an unsure model shouldn't overrule the standard AI: it only breaks ties it is confident about
+        int chosen = answer.index();
+        double floor = AiProfileUtil.getIntProperty(ai, AiProps.LLM_MIN_CONFIDENCE_PCT) / 100.0;
+        boolean overruled = forgeIndex >= 0 && chosen != forgeIndex && answer.confidence() < floor;
+        if (overruled) {
+            chosen = forgeIndex;
         }
-        String picked = options.get(answer.index());
+        synchronized (b) {
+            b.cache.put(who + "|" + cacheKey, chosen);
+        }
+        String picked = options.get(chosen);
+        String note = overruled
+                ? " (model suggested " + options.get(answer.index()) + " at " + Math.round(answer.confidence() * 100)
+                        + "% confidence, keeping standard AI choice)"
+                : (answer.reason().isEmpty() ? "" : " (" + answer.reason() + ")");
         LlmStatus.fireFinished(who, "chose " + picked, elapsed);
         // STACK_ADD rather than INFORMATION so it shows at the default (medium) log verbosity
-        game.getGameLog().add(GameLogEntryType.STACK_ADD, "[AI assist] " + who + " " + activity + ": "
-                + picked + (answer.reason().isEmpty() ? "" : " (" + answer.reason() + ")"));
-        return answer.index();
+        game.getGameLog().add(GameLogEntryType.STACK_ADD, "[AI assist] " + who + " " + activity + ": " + picked + note);
+        return chosen;
     }
 
     /** Record an answer the hook derived itself, so the same question isn't asked again this turn. */

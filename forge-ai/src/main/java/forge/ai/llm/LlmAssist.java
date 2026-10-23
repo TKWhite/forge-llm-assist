@@ -2,10 +2,14 @@ package forge.ai.llm;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.WeakHashMap;
 
 import forge.ai.AiController;
 import forge.ai.AiPlayDecision;
@@ -34,6 +38,11 @@ public final class LlmAssist {
     private static final List<String> CAST_OPTIONS = List.of("Yes, use it now", "No, hold it for later");
 
     private LlmAssist() {
+    }
+
+    /** Called once per AI player as a match starts: begin working out the game plan in the background. */
+    public static void gameStarting(Player ai) {
+        GamePlanner.start(ai);
     }
 
     // ------------------------------------------------------------------
@@ -364,8 +373,31 @@ public final class LlmAssist {
     public static Card refineTutor(Player ai, SpellAbility sa, List<ZoneType> origin, ZoneType destination,
                                    Collection<Card> fetchList, Card forgePick, Player decider) {
         if (forgePick == null || forgePick.isLand() || sa == null || (decider != null && decider != ai)
-                || origin == null || origin.size() != 1 || origin.get(0) != ZoneType.Library
-                || !LlmGate.mayAsk(ai, AiProps.LLM_HOOK_TUTOR)) {
+                || origin == null || origin.size() != 1 || origin.get(0) != ZoneType.Library) {
+            return forgePick;
+        }
+        // the game plan's key cards beat the generic "most valuable card" pick, even without a model call
+        GamePlan plan = GamePlanner.current(ai);
+        Card planPick = null;
+        if (plan != null && !plan.isKeyCard(forgePick.getName())) {
+            Set<String> haveAccess = new HashSet<>();
+            for (Card c : ai.getCardsIn(ZoneType.Hand)) {
+                haveAccess.add(c.getName());
+            }
+            for (Card c : ai.getCardsIn(ZoneType.Battlefield)) {
+                haveAccess.add(c.getName());
+            }
+            for (Card c : fetchList) {
+                if (plan.isKeyCard(c.getName()) && !haveAccess.contains(c.getName())) {
+                    planPick = c;
+                    break;
+                }
+            }
+        }
+        if (planPick != null) {
+            forgePick = planPick;
+        }
+        if (!LlmGate.mayAsk(ai, AiProps.LLM_HOOK_TUTOR)) {
             return forgePick;
         }
         List<Card> pool = new ArrayList<>();
@@ -415,17 +447,52 @@ public final class LlmAssist {
         return sa.getApi() != ApiType.ChangeZoneAll || sa.getParamOrDefault("Origin", "").contains("Battlefield");
     }
 
-    /** Second opinion on a board wipe the standard AI decided to cast. False means hold it this turn. */
+    /**
+     * Second opinion on a spell the standard AI decided to cast: board wipes, and payoffs the game plan
+     * says to hold for the right moment. False means hold it this turn.
+     */
     public static boolean confirmPlay(Player ai, SpellAbility sa) {
-        if (!isWipe(sa) || !LlmGate.mayAsk(ai, AiProps.LLM_HOOK_WIPE)) {
+        Card host = sa.getHostCard();
+        if (host == null) {
             return true;
         }
-        Card host = sa.getHostCard();
-        int pick = LlmGate.ask(ai, AiProps.LLM_HOOK_WIPE, "wipe", "deciding whether to cast " + host.getName() + " now",
-                "The standard AI wants to cast the mass-removal spell " + host.getName()
-                        + " now. Considering everyone's board (including yours), should you cast it now or wait?",
-                CONFIRM_OPTIONS, List.of(host), 0, "wipe:" + host.getId());
+        if (isWipe(sa) && LlmGate.mayAsk(ai, AiProps.LLM_HOOK_WIPE)) {
+            int pick = LlmGate.ask(ai, AiProps.LLM_HOOK_WIPE, "wipe", "deciding whether to cast " + host.getName() + " now",
+                    "The standard AI wants to cast the mass-removal spell " + host.getName()
+                            + " now. Considering everyone's board (including yours), should you cast it now or wait?",
+                    CONFIRM_OPTIONS, List.of(host), 0, "wipe:" + host.getId());
+            return pick != 1;
+        }
+        GamePlan plan = sa.isSpell() ? GamePlanner.current(ai) : null;
+        String castWhen = plan == null ? null : plan.holdCondition(host.getName());
+        if (castWhen == null) {
+            return true;
+        }
+        int alreadyHeld = holdTurns(ai, host);
+        if (alreadyHeld >= AiProfileUtil.getIntProperty(ai, AiProps.LLM_MAX_HOLD_TURNS)
+                || !LlmGate.mayAsk(ai, AiProps.LLM_HOOK_HOLD)) {
+            return true;
+        }
+        String key = "hold:" + host.getId();
+        boolean askedThisTurn = LlmGate.cached(ai, key) >= 0;
+        int pick = LlmGate.ask(ai, AiProps.LLM_HOOK_HOLD, "hold", "deciding whether to cast " + host.getName() + " now",
+                "The standard AI wants to cast " + host.getName() + " now. Your game plan says to hold it until: "
+                        + castWhen + "." + (alreadyHeld > 0 ? " You have already held it for " + alreadyHeld
+                        + (alreadyHeld == 1 ? " turn" : " turns") + "; a payoff that is never cast does nothing." : "")
+                        + " Is now the right moment?",
+                CONFIRM_OPTIONS, List.of(host), 0, key);
+        if (pick == 1 && !askedThisTurn) {
+            holdCounts.computeIfAbsent(ai.getGame(), g -> new HashMap<>()).merge(host.getId(), 1, Integer::sum);
+        }
         return pick != 1;
+    }
+
+    /** Turns each held card has been held so far, per game (card ids are unique within a game). */
+    private static final Map<Game, Map<Integer, Integer>> holdCounts = Collections.synchronizedMap(new WeakHashMap<>());
+
+    private static int holdTurns(Player ai, Card host) {
+        Map<Integer, Integer> counts = holdCounts.get(ai.getGame());
+        return counts == null ? 0 : counts.getOrDefault(host.getId(), 0);
     }
 
     // ------------------------------------------------------------------
@@ -465,10 +532,29 @@ public final class LlmAssist {
             return forgeKeep;
         }
         LlmGate.remember(ai, "mulligan-asked", 1);
+        GamePlan plan = GamePlanner.await(ai);
         List<Card> hand = new ArrayList<>(ai.getCardsIn(ZoneType.Hand));
+        int lands = 0;
+        for (Card c : hand) {
+            if (c.isLand()) {
+                lands++;
+            }
+        }
+        StringBuilder q = new StringBuilder("Your opening hand has ").append(hand.size()).append(" cards (")
+                .append(lands).append(" lands). Keep it or mulligan? Your commander is always available.");
+        if (plan != null) {
+            GamePlan.Mulligan m = plan.mulligan();
+            q.append(" Your plan's guidance: keep ").append(m.minLands()).append('-').append(m.maxLands()).append(" lands");
+            if (!m.wantAny().isEmpty()) {
+                q.append(", ideally with any of ").append(String.join(", ", m.wantAny()));
+            }
+            if (!m.notes().isEmpty()) {
+                q.append(". ").append(m.notes());
+            }
+            q.append('.');
+        }
         int pick = LlmGate.ask(ai, AiProps.LLM_HOOK_MULLIGAN, "mulligan", "deciding whether to mulligan",
-                "Your opening hand has " + hand.size() + " cards. Keep it or mulligan? Your commander is always available.",
-                MULLIGAN_OPTIONS, hand, forgeKeep ? 0 : 1, "mulligan");
+                q.toString(), MULLIGAN_OPTIONS, hand, forgeKeep ? 0 : 1, "mulligan");
         return pick < 0 ? forgeKeep : pick == 0;
     }
 

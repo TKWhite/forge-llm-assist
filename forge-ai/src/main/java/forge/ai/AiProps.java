@@ -165,7 +165,17 @@ public enum AiProps {
     LLM_HOOK_TUTOR ("true"),
     LLM_HOOK_WIPE ("true"),
     LLM_HOOK_COUNTER ("true"),
-    LLM_HOOK_MULLIGAN ("false");
+    LLM_HOOK_MULLIGAN ("false"),
+    LLM_HOOK_HOLD ("true"),
+    // after holding a payoff this many turns the AI stops asking and lets the standard AI cast it
+    LLM_MAX_HOLD_TURNS ("3"),
+    // the model only overrules the standard AI's own pick when at least this confident
+    LLM_MIN_CONFIDENCE_PCT ("35"),
+    // game plan: one planner call per deck (DeepSeek), cached in %APPDATA%/Forge/llm-plans
+    LLM_PLANNER_ENABLED ("false"),
+    LLM_PLANNER_MODEL ("deepseek-v4-pro"),
+    LLM_PLANNER_TIMEOUT_MS ("90000"),
+    LLM_PLAN_WAIT_MS ("30000");
     // Experimental features, must be promoted or removed after extensive testing and, ideally, defaulting
     // <-- There are no experimental options here -->
 

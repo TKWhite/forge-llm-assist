@@ -37,7 +37,12 @@ public final class StateSerializer {
         sb.append("Turn ").append(ph.getTurn()).append(" (round ").append(round(game)).append("), phase ")
                 .append(ph.getPhase()).append(", active player: ")
                 .append(ph.getPlayerTurn() == null ? "-" : ph.getPlayerTurn().getName()).append('\n');
-        sb.append("You are ").append(me.getName()).append(".\n\n");
+        sb.append("You are ").append(me.getName()).append(".\n");
+        GamePlan plan = GamePlanner.current(me);
+        if (plan != null) {
+            sb.append(plan.toPromptBlock());
+        }
+        sb.append('\n');
 
         for (Player p : game.getPlayers()) {
             describePlayer(sb, p, p == me);

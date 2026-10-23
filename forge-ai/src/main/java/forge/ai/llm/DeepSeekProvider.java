@@ -77,6 +77,74 @@ public class DeepSeekProvider implements LlmProvider {
         return parseResponse(response.body(), options.size(), latency);
     }
 
+    /** Free-form JSON answer for the planner: one system and one user message, larger output allowance. */
+    public JsonObject completeJson(String system, String user, int maxTokens, long timeoutMs) throws LlmException {
+        JsonObject req = new JsonObject();
+        req.addProperty("model", model);
+        req.addProperty("temperature", 0.2);
+        req.addProperty("max_tokens", maxTokens);
+        JsonObject format = new JsonObject();
+        format.addProperty("type", "json_object");
+        req.add("response_format", format);
+        JsonArray messages = new JsonArray();
+        messages.add(message("system", system));
+        messages.add(message("user", user));
+        req.add("messages", messages);
+
+        HttpRequest request = HttpRequest.newBuilder(URI.create(baseUrl + "/chat/completions"))
+                .timeout(Duration.ofMillis(timeoutMs))
+                .header("Content-Type", "application/json")
+                .header("Authorization", "Bearer " + apiKey)
+                .POST(HttpRequest.BodyPublishers.ofString(req.toString()))
+                .build();
+        HttpResponse<String> response;
+        try {
+            response = http.send(request, HttpResponse.BodyHandlers.ofString());
+        } catch (HttpTimeoutException e) {
+            throw new LlmException("timed out after " + timeoutMs + " ms", e);
+        } catch (IOException e) {
+            throw new LlmException("request failed: " + e.getMessage(), e);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new LlmException("interrupted", e);
+        }
+        if (response.statusCode() != 200) {
+            String text = response.body();
+            throw new LlmException("HTTP " + response.statusCode() + ": " + (text.length() > 200 ? text.substring(0, 200) : text));
+        }
+        try {
+            JsonObject root = JsonParser.parseString(response.body()).getAsJsonObject();
+            JsonObject choice = root.getAsJsonArray("choices").get(0).getAsJsonObject();
+            JsonElement content = choice.getAsJsonObject("message").get("content");
+            String text = content == null || content.isJsonNull() ? "" : content.getAsString();
+            if (text.isBlank()) {
+                // reasoning models spend output tokens thinking first; "length" means the allowance ran out
+                String finish = choice.has("finish_reason") && !choice.get("finish_reason").isJsonNull()
+                        ? choice.get("finish_reason").getAsString() : "?";
+                throw new LlmException("empty answer (finish_reason=" + finish + ")");
+            }
+            return extractJsonObject(text);
+        } catch (JsonParseException | IllegalStateException | NullPointerException | IndexOutOfBoundsException
+                 | UnsupportedOperationException e) {
+            throw new LlmException("unreadable answer: " + e.getMessage(), e);
+        }
+    }
+
+    /** Pull the JSON object out of an answer that may carry reasoning (think blocks) or code fences. */
+    static JsonObject extractJsonObject(String content) throws LlmException {
+        String text = content.replaceAll("(?s)<think>.*?</think>", "");
+        int open = text.indexOf('{');
+        int close = text.lastIndexOf('}');
+        if (open < 0 || close < open) {
+            throw new LlmException("no JSON object in answer: " + (text.length() > 200 ? text.substring(0, 200) : text));
+        }
+        try {
+            return JsonParser.parseString(text.substring(open, close + 1)).getAsJsonObject();
+        } catch (JsonParseException | IllegalStateException e) {
+            throw new LlmException("unreadable JSON: " + e.getMessage(), e);
+        }
+    }
+
     String buildRequest(String state, String question, List<String> options) {
         StringBuilder user = new StringBuilder();
         user.append("GAME STATE\n").append(state).append("\n\nDECISION\n").append(question).append("\n\nOPTIONS\n");
@@ -87,7 +155,8 @@ public class DeepSeekProvider implements LlmProvider {
         JsonObject req = new JsonObject();
         req.addProperty("model", model);
         req.addProperty("temperature", 0);
-        req.addProperty("max_tokens", 120);
+        // room for the reasoning DeepSeek does before answering
+        req.addProperty("max_tokens", 2000);
         JsonObject format = new JsonObject();
         format.addProperty("type", "json_object");
         req.add("response_format", format);
@@ -116,13 +185,8 @@ public class DeepSeekProvider implements LlmProvider {
                 tokens = root.getAsJsonObject("usage").get("prompt_tokens").getAsInt();
             }
 
-            // tolerate prose or code fences around the object
-            int open = content.indexOf('{');
-            int close = content.lastIndexOf('}');
-            if (open < 0 || close < open) {
-                throw new LlmException("no JSON object in answer: " + content);
-            }
-            JsonObject answer = JsonParser.parseString(content.substring(open, close + 1)).getAsJsonObject();
+            // tolerate reasoning, prose or code fences around the object
+            JsonObject answer = extractJsonObject(content);
             JsonElement choice = answer.get("choice");
             if (choice == null || !choice.isJsonPrimitive()) {
                 throw new LlmException("answer has no choice: " + content);
