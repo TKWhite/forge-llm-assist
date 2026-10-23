@@ -1,6 +1,7 @@
 package forge.ai;
 
 import forge.ai.llm.LlmAssist;
+import forge.ai.llm.RoutedCards;
 
 import com.google.common.collect.*;
 import forge.LobbyPlayer;
@@ -341,6 +342,9 @@ public class PlayerControllerAi extends PlayerController {
             reveal(delayedReveal);
         }
         T choice = SpellApiToAi.Converter.get(sa).chooseSingleEntity(player, sa, optionList, isOptional, targetedPlayer, params);
+        if (sa != null && RoutedCards.isRouted(player, sa.getHostCard())) {
+            return LlmAssist.routedChoice(player, sa, optionList, choice, isOptional);
+        }
         return LlmAssist.refineEntity(player, sa, optionList, choice);
     }
 
@@ -388,7 +392,12 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public boolean confirmAction(SpellAbility sa, PlayerActionConfirmMode mode, String message, List<String> options, Card cardToShow, Map<String, Object> params) {
-        return getAi().confirmAction(sa, mode, message, params);
+        boolean forgeAnswer = getAi().confirmAction(sa, mode, message, params);
+        // rules prompts such as moving a commander to the command zone are never handed to the assist
+        if (sa == null || mode == PlayerActionConfirmMode.ChangeZoneToAltDestination) {
+            return forgeAnswer;
+        }
+        return LlmAssist.routedConfirm(player, sa.getHostCard(), message, forgeAnswer);
     }
 
     @Override
@@ -461,7 +470,11 @@ public class PlayerControllerAi extends PlayerController {
         if (effectSA != null) {
             effectSA.setActivatingPlayer(host.getController());
         }
-        return brains.aiShouldRun(replacementEffect, effectSA, host, affected);
+        boolean forgeAnswer = brains.aiShouldRun(replacementEffect, effectSA, host, affected);
+        // optional "as this enters..." choices on routed cards (e.g. enter as a copy) go to the assist; other
+        // optional replacements, such as the commander moving to the command zone, stay with the standard AI
+        boolean asItEnters = replacementEffect.hasParam("Optional") && "Battlefield".equals(replacementEffect.getParam("Destination"));
+        return asItEnters ? LlmAssist.routedConfirm(player, host, question, forgeAnswer) : forgeAnswer;
     }
 
     @Override
@@ -774,7 +787,7 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public boolean mulliganKeepHand(Player firstPlayer, int cardsToReturn)  {
-        return LlmAssist.keepHand(player, !ComputerUtil.wantMulligan(player, cardsToReturn));
+        return LlmAssist.keepHand(player, !ComputerUtil.wantMulligan(player, cardsToReturn), cardsToReturn);
     }
 
     @Override
@@ -1048,7 +1061,7 @@ public class PlayerControllerAi extends PlayerController {
         if (sa.getChosenList() == null) {
             getAi().doTrigger(sa, true);
         }
-        return sa.getChosenList();
+        return LlmAssist.routedModes(brains, player, sa, possible, num, sa.getChosenList());
     }
 
     @Override

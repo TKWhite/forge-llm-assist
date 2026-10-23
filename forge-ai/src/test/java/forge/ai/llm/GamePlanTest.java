@@ -29,7 +29,9 @@ public class GamePlanTest {
                 + "{\"card\":\"Imaginary Card\",\"castWhen\":\"never\"}],"
                 + "\"rampPriority\":[\"Sol Ring\",\"Cursed Mirror\"],"
                 + "\"mulligan\":{\"minLands\":3,\"maxLands\":5,\"wantAny\":[\"Sol Ring\"],\"keepNotes\":\"need ramp\"},"
-                + "\"watchFor\":\"flyers\"}");
+                + "\"watchFor\":\"flyers\","
+                + "\"contextCards\":[{\"card\":\"Cursed Mirror\",\"risk\":\"dual-use\",\"guidance\":\"copy only before combat\"},"
+                + "{\"card\":\"Fake Card\",\"risk\":\"timing\",\"guidance\":\"x\"}]}");
         assertEquals(plan.archetype(), "Dragon ramp");
         assertEquals(plan.winConditions().get(0).cards(), List.of("Old Gnawbone"), "deck spelling kept, unknown dropped");
         assertEquals(plan.keyCards(), List.of("Sol Ring"));
@@ -40,6 +42,9 @@ public class GamePlanTest {
         assertFalse(plan.isKeyCard("Mountain"));
         assertEquals(plan.mulligan().minLands(), 3);
         assertTrue(plan.toPromptBlock().contains("Blasphemous Act (opponents have more creatures)"));
+        assertEquals(plan.contextCards().size(), 1, "unknown context card dropped");
+        assertEquals(plan.contextGuidance("cursed mirror"), "copy only before combat");
+        assertNull(plan.contextGuidance("Sol Ring"));
     }
 
     @Test

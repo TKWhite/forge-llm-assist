@@ -8,14 +8,21 @@ LLM_MODEL=jev-latest
 # Only from this round (times around the table) onward; early turns stay with the standard AI
 LLM_MIN_ROUND=4
 # per AI player
-LLM_MAX_CALLS_GAME=40
-LLM_MAX_CALLS_TURN=3
+LLM_MAX_CALLS_GAME=120
+LLM_MAX_CALLS_TURN=10
 LLM_TIMEOUT_MS=4000
 # Ask about a target when the best two candidates score within this percentage of each other
 LLM_CLOSENESS_PCT=15
 LLM_MAX_OPTIONS=6
+# Close calls: the model overrules the standard AI only if it rates its pick this many points higher
+# (DeepSeek, which gives no probabilities, uses LLM_MIN_CONFIDENCE_PCT instead)
+LLM_MIN_MARGIN_PCT=10
 # Individual decision points
-LLM_HOOK_UNSUPPORTED_CARDS=true
+# Routed cards: ones the standard AI can't be trusted with (unsupported, dual-use, temporary effects, modes,
+# X costs, extra combats, plus the game plan's context cards). The model always decides these, from turn 1,
+# with no per-turn limit; LLM_MAX_ROUTED_CALLS_GAME is only a safety cap.
+LLM_HOOK_ROUTED=true
+LLM_MAX_ROUTED_CALLS_GAME=300
 LLM_HOOK_DEFENDER=true
 LLM_HOOK_TARGETS=true
 LLM_HOOK_AGGRESSION=true
@@ -27,7 +34,6 @@ LLM_HOOK_MULLIGAN=true
 LLM_HOOK_HOLD=true
 # Stop holding a payoff (let the standard AI cast it) after this many turns of waiting
 LLM_MAX_HOLD_TURNS=3
-# Jev only overrules the standard AI's own pick when at least this confident (percent)
 LLM_MIN_CONFIDENCE_PCT=35
 # Game plan (one DeepSeek call per deck, then cached)
 LLM_PLANNER_ENABLED=true

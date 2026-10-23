@@ -1564,8 +1564,9 @@ public class AiController {
             saList = ComputerUtilAbility.getSpellAbilities(cards, player);
         }
 
-        // cards the AI can't evaluate are set aside for the LLM assist (if enabled) to consider
-        final List<SpellAbility> unsupported = saList.stream().filter(LlmAssist::isUnsupported).collect(Collectors.toList());
+        // routed cards (see forge.ai.llm.RoutedCards) are decided by the LLM assist, never by the standard AI
+        final List<SpellAbility> routed = saList.stream().filter(sa -> LlmAssist.isProactiveRouted(player, sa)).collect(Collectors.toList());
+        saList.removeAll(routed);
         saList.removeIf(spellAbility -> {
             // don't include removedAI cards if somehow the AI can play the ability or gain control of unsupported card
             // TODO allow when experimental profile?
@@ -1578,21 +1579,27 @@ public class AiController {
         //update LivingEndPlayer
         useLivingEnd = IterableUtil.any(player.getZone(ZoneType.Library), CardPredicates.nameEquals("Living End"));
 
+        if (!topOwnedByAI) {
+            SpellAbility routedPlay = LlmAssist.playRouted(this, player, routed);
+            if (routedPlay != null) {
+                return routedPlay;
+            }
+        }
+
         SpellAbility chosenSa = chooseSpellAbilityToPlayFromList(saList, true);
 
         if (topOwnedByAI && !mustRespond && chosenSa != ComputerUtilAbility.getFirstCopySASpell(saList)) {
             return null; // not planning to copy the spell and not marked as something the AI would respond to
         }
 
-        if (chosenSa != null && !LlmAssist.confirmPlay(player, chosenSa)) {
-            // the assist says hold this one (e.g. a board wipe), look for something else to do instead
+        // the assist may say hold this one (a board wipe, a payoff); then look for something else to do,
+        // and give the replacement pick the same check
+        for (int i = 0; chosenSa != null && i < 5 && !LlmAssist.confirmPlay(player, chosenSa); i++) {
             final Card held = chosenSa.getHostCard();
             saList.removeIf(sa -> sa.getHostCard() == held);
             chosenSa = chooseSpellAbilityToPlayFromList(saList, true);
         }
-        if (chosenSa == null) {
-            chosenSa = LlmAssist.playUnsupported(this, player, unsupported);
-        } else {
+        if (chosenSa != null) {
             LlmAssist.refineTarget(player, chosenSa);
         }
 

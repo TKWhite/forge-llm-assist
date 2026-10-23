@@ -39,6 +39,7 @@ public class LlmAssistTest extends AITest {
         final List<String> states = new ArrayList<>();
         int answer;
         double confidence = 0.9;
+        double[] probabilities;
 
         FakeProvider(int answer) {
             this.answer = answer;
@@ -56,7 +57,7 @@ public class LlmAssistTest extends AITest {
             if (answer < 0) {
                 throw new LlmException("simulated timeout");
             }
-            return new LlmAnswer(Math.min(answer, options.size() - 1), confidence, "test", 100, 5);
+            return new LlmAnswer(Math.min(answer, options.size() - 1), confidence, "test", 100, 5, probabilities);
         }
     }
 
@@ -138,10 +139,10 @@ public class LlmAssistTest extends AITest {
         FakeProvider provider = new FakeProvider(0);
         setUpGame("LlmAssisted", 13, provider);
         List<String> options = List.of("a", "b");
-        for (int i = 0; i < 6; i++) {
+        for (int i = 0; i < 14; i++) {
             LlmGate.ask(ai, AiProps.LLM_HOOK_TARGETS, "test", "testing", "q" + i, options, List.of(), -1, "key" + i);
         }
-        AssertJUnit.assertEquals(3, provider.questions.size()); // LLM_MAX_CALLS_TURN=3 in LlmAssisted.ai
+        AssertJUnit.assertEquals(10, provider.questions.size()); // LLM_MAX_CALLS_TURN=10 in LlmAssisted.ai
     }
 
     @Test
@@ -189,7 +190,7 @@ public class LlmAssistTest extends AITest {
             String hash = GamePlanner.hash(deck);
             File file = new File(dir, "Test Dragons-" + hash + ".json");
             java.nio.file.Files.writeString(file.toPath(), "{\"archetype\":\"Dragons\",\"summary\":\"Ramp then dragons.\","
-                    + "\"holdCards\":[{\"card\":\"Shivan Dragon\",\"castWhen\":\"an opponent is tapped out\"}]}");
+                    + "\"holdCards\":[{\"card\":\"Shivan Dragon\",\"castWhen\":\"an opponent is tapped out\"}],\"contextCards\":[]}");
 
             // a model call would fail: no DEEPSEEK key is needed when the cached file exists
             GamePlan plan = GamePlanner.load(deck, "Test Dragons", hash, "unused", 1000);
@@ -199,5 +200,62 @@ public class LlmAssistTest extends AITest {
         } finally {
             System.clearProperty("forge.llm.plans");
         }
+    }
+
+    @Test
+    public void probabilityMarginDecidesCloseCalls() {
+        FakeProvider provider = new FakeProvider(1);
+        setUpGame("LlmAssisted", 13, provider);
+        // LLM_MIN_MARGIN_PCT=10: option 2 at 0.45 vs standard pick at 0.40 is not clearly better
+        provider.probabilities = new double[] {0.40, 0.45, 0.15};
+        provider.confidence = 0.9;
+        int pick = LlmGate.ask(ai, AiProps.LLM_HOOK_TARGETS, "test", "testing", "q", List.of("a", "b", "c"), List.of(), 0, "m1");
+        AssertJUnit.assertEquals(0, pick);
+        // 0.30 vs 0.20 with six options: a clear preference even at low absolute probability
+        provider.probabilities = new double[] {0.20, 0.30, 0.15, 0.15, 0.10, 0.10};
+        provider.confidence = 0.05;
+        pick = LlmGate.ask(ai, AiProps.LLM_HOOK_TARGETS, "test", "testing", "q", List.of("a", "b", "c", "d", "e", "f"), List.of(), 0, "m2");
+        AssertJUnit.assertEquals(1, pick);
+    }
+
+    @Test
+    public void routedQuestionsIgnoreMarginAndPerTurnLimit() {
+        FakeProvider provider = new FakeProvider(1);
+        provider.probabilities = new double[] {0.49, 0.51};
+        setUpGame("LlmAssisted", 2, provider); // before LLM_MIN_ROUND too
+        for (int i = 0; i < 12; i++) {
+            int pick = LlmGate.askRouted(ai, "test", "testing", "q", List.of("a", "b"), List.of(), 0, "r" + i);
+            AssertJUnit.assertEquals("routed answers stand", 1, pick);
+        }
+        AssertJUnit.assertEquals(12, provider.questions.size());
+    }
+
+    @Test
+    public void classifiesCardsTheStandardAiMisplays() {
+        setUpGame("LlmAssisted", 13, new FakeProvider(0));
+        java.util.Set<RoutedCards.Tag> mirror = RoutedCards.classify(addCard("Cursed Mirror", ai));
+        AssertJUnit.assertTrue(mirror.toString(), mirror.contains(RoutedCards.Tag.TEMPORARY));
+        AssertJUnit.assertTrue(mirror.toString(), mirror.contains(RoutedCards.Tag.OPTIONAL_CHOICE));
+        AssertJUnit.assertTrue(RoutedCards.classify(addCard("Ghoulcaller Gisa", ai)).contains(RoutedCards.Tag.UNSUPPORTED));
+        AssertJUnit.assertTrue(RoutedCards.classify(addCardToZone("Exsanguinate", ai, ZoneType.Hand)).contains(RoutedCards.Tag.X_COST));
+        AssertJUnit.assertTrue(RoutedCards.classify(addCard("Hellkite Charger", ai)).contains(RoutedCards.Tag.EXTRA_COMBAT));
+        AssertJUnit.assertTrue("plain mana rock", RoutedCards.classify(addCard("Sol Ring", ai)).isEmpty());
+        AssertJUnit.assertTrue("plain land", RoutedCards.classify(addCard("Mountain", ai)).isEmpty());
+        AssertJUnit.assertTrue(LlmAssist.isRouted(ai, addCard("Cursed Mirror", ai).getFirstSpellAbility()));
+    }
+
+    @Test
+    public void mulliganRules() {
+        // size, finalSize, lands, colours, ramp, early plays, off-colour, free, commander mv
+        AssertJUnit.assertEquals("2 lands, no ramp, free", 0, LlmAssist.mulliganRule(new LlmAssist.HandFacts(7, 7, 2, 1, 0, 3, 0, true, 5)));
+        AssertJUnit.assertEquals("2 lands, no ramp, not free: keep", 1, LlmAssist.mulliganRule(new LlmAssist.HandFacts(7, 6, 2, 1, 0, 3, 0, false, 5)));
+        AssertJUnit.assertEquals("2 lands + ramp: keep", 1, LlmAssist.mulliganRule(new LlmAssist.HandFacts(7, 7, 2, 2, 1, 3, 0, true, 5)));
+        AssertJUnit.assertEquals("1 land", 0, LlmAssist.mulliganRule(new LlmAssist.HandFacts(7, 7, 1, 1, 1, 2, 0, false, 5)));
+        AssertJUnit.assertEquals("3 lands with plays", 1, LlmAssist.mulliganRule(new LlmAssist.HandFacts(7, 7, 3, 2, 0, 2, 0, true, 5)));
+        AssertJUnit.assertEquals("4 lands, nothing castable: keep", 1, LlmAssist.mulliganRule(new LlmAssist.HandFacts(7, 7, 4, 1, 0, 0, 3, true, 5)));
+        AssertJUnit.assertEquals("6 lands, free", 0, LlmAssist.mulliganRule(new LlmAssist.HandFacts(7, 7, 6, 2, 0, 1, 0, true, 5)));
+        AssertJUnit.assertEquals("down to 4: keep", 1, LlmAssist.mulliganRule(new LlmAssist.HandFacts(7, 4, 1, 1, 0, 0, 0, false, 5)));
+        AssertJUnit.assertEquals("no lands at 5: mulligan", 0, LlmAssist.mulliganRule(new LlmAssist.HandFacts(7, 5, 0, 0, 0, 0, 0, false, 5)));
+        AssertJUnit.assertEquals("6 lands, not free: keep", 1, LlmAssist.mulliganRule(new LlmAssist.HandFacts(7, 6, 6, 2, 0, 1, 0, false, 5)));
     }
 }

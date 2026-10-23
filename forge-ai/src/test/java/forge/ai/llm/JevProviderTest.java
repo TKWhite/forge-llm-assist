@@ -44,6 +44,9 @@ public class JevProviderTest {
         assertEquals(a.index(), 1);
         assertEquals(a.confidence(), 0.8, 1e-9);
         assertEquals(a.inputTokens(), 900);
+        assertEquals(a.probabilities().length, 3);
+        assertEquals(a.probabilities()[1], 0.8, 1e-9);
+        assertEquals(a.probabilities()[2], 0.1, 1e-9);
     }
 
     @Test

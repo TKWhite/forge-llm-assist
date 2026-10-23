@@ -15,9 +15,17 @@ import forge.game.card.Card;
 import forge.game.player.Player;
 
 /**
- * Budget and policy for model calls. Every hook goes through {@link #ask}, which returns -1
- * whenever the standard AI should decide instead: disabled, no API key, too early in the game,
+ * Budget and policy for model calls. Every hook goes through {@link #ask} or {@link #askRouted}, which
+ * return -1 whenever the standard AI should decide instead: disabled, no API key, too early in the game,
  * budget spent, on the timed AI evaluation thread, or the call failed.
+ * <p>
+ * Two kinds of call:
+ * <ul>
+ * <li>close-call hooks ({@link #ask}): the model may overrule the standard AI's own pick only when it
+ * clearly prefers its answer; limited per turn and from LLM_MIN_ROUND.</li>
+ * <li>routed cards ({@link #askRouted}): cards the standard AI can't be trusted with. The model's answer
+ * stands, from turn 1, with no per-turn limit (a generous per-game safety cap only).</li>
+ * </ul>
  */
 public final class LlmGate {
     /** Name of the worker thread AiController runs its timed spell evaluation on. */
@@ -30,9 +38,12 @@ public final class LlmGate {
     private static final class Budget {
         /** per AI player, for the whole game */
         final Map<String, Integer> calls = new HashMap<>();
+        final Map<String, Integer> routedCalls = new HashMap<>();
         int turn = -1;
         final Map<String, Integer> turnCalls = new HashMap<>();
         final Map<String, Integer> cache = new HashMap<>();
+        /** survives turn changes */
+        final Map<String, Integer> gameMemory = new HashMap<>();
     }
 
     private LlmGate() {
@@ -60,12 +71,17 @@ public final class LlmGate {
             return false;
         }
         Game game = ai.getGame();
+        Budget b = budget(game);
+        if (hook == AiProps.LLM_HOOK_ROUTED) {
+            synchronized (b) {
+                return b.routedCalls.getOrDefault(ai.getName(), 0) < AiProfileUtil.getIntProperty(ai, AiProps.LLM_MAX_ROUTED_CALLS_GAME);
+            }
+        }
         // mulligans and holding back payoffs matter from the very start, the rest only from LLM_MIN_ROUND
         if (hook != AiProps.LLM_HOOK_MULLIGAN && hook != AiProps.LLM_HOOK_HOLD
                 && StateSerializer.round(game) < AiProfileUtil.getIntProperty(ai, AiProps.LLM_MIN_ROUND)) {
             return false;
         }
-        Budget b = budget(game);
         synchronized (b) {
             rollTurn(b, game);
             return b.calls.getOrDefault(ai.getName(), 0) < AiProfileUtil.getIntProperty(ai, AiProps.LLM_MAX_CALLS_GAME)
@@ -82,8 +98,33 @@ public final class LlmGate {
         }
     }
 
+    /** Record an answer the hook derived itself, so the same question isn't asked again this turn. */
+    public static void remember(Player ai, String cacheKey, int value) {
+        Budget b = budget(ai.getGame());
+        synchronized (b) {
+            rollTurn(b, ai.getGame());
+            b.cache.put(ai.getName() + "|" + cacheKey, value);
+        }
+    }
+
+    /** Per-game memory that survives turn changes (e.g. how many mulligan decisions so far). */
+    public static int gameMemory(Player ai, String key) {
+        Budget b = budget(ai.getGame());
+        synchronized (b) {
+            return b.gameMemory.getOrDefault(ai.getName() + "|" + key, 0);
+        }
+    }
+
+    public static void setGameMemory(Player ai, String key, int value) {
+        Budget b = budget(ai.getGame());
+        synchronized (b) {
+            b.gameMemory.put(ai.getName() + "|" + key, value);
+        }
+    }
+
     /**
-     * Ask the model to pick one of {@code options}.
+     * Close-call question: the model may overrule the standard AI's pick ({@code forgeIndex}) only if it
+     * clearly prefers its own answer (see {@link #overrule}).
      *
      * @param hook        short hook name for the log
      * @param activity    what the AI is doing, for the on-screen indicator ("choosing a target for X")
@@ -94,6 +135,18 @@ public final class LlmGate {
      */
     public static int ask(Player ai, AiProps hookProp, String hook, String activity, String question,
                           List<String> options, Collection<Card> focusCards, int forgeIndex, String cacheKey) {
+        return askInternal(ai, hookProp, hook, activity, question, options, focusCards, forgeIndex, cacheKey, false);
+    }
+
+    /** Routed-card question: the model's answer stands (no margin check), no per-turn limit. */
+    public static int askRouted(Player ai, String hook, String activity, String question,
+                                List<String> options, Collection<Card> focusCards, int forgeIndex, String cacheKey) {
+        return askInternal(ai, AiProps.LLM_HOOK_ROUTED, hook, activity, question, options, focusCards, forgeIndex, cacheKey, true);
+    }
+
+    private static int askInternal(Player ai, AiProps hookProp, String hook, String activity, String question,
+                                   List<String> options, Collection<Card> focusCards, int forgeIndex, String cacheKey,
+                                   boolean authoritative) {
         int hit = cached(ai, cacheKey);
         if (hit >= 0 && hit < options.size()) {
             return hit;
@@ -104,8 +157,12 @@ public final class LlmGate {
         Game game = ai.getGame();
         Budget b = budget(game);
         synchronized (b) {
-            b.calls.merge(ai.getName(), 1, Integer::sum);
-            b.turnCalls.merge(ai.getName(), 1, Integer::sum);
+            if (authoritative) {
+                b.routedCalls.merge(ai.getName(), 1, Integer::sum);
+            } else {
+                b.calls.merge(ai.getName(), 1, Integer::sum);
+                b.turnCalls.merge(ai.getName(), 1, Integer::sum);
+            }
         }
 
         String fullQuestion = forgeIndex >= 0
@@ -136,10 +193,8 @@ public final class LlmGate {
             LlmStatus.fireFinished(who, "AI assist unavailable (" + error + "), using standard AI", elapsed);
             return -1;
         }
-        // an unsure model shouldn't overrule the standard AI: it only breaks ties it is confident about
         int chosen = answer.index();
-        double floor = AiProfileUtil.getIntProperty(ai, AiProps.LLM_MIN_CONFIDENCE_PCT) / 100.0;
-        boolean overruled = forgeIndex >= 0 && chosen != forgeIndex && answer.confidence() < floor;
+        boolean overruled = !authoritative && forgeIndex >= 0 && chosen != forgeIndex && !overrule(ai, answer, forgeIndex);
         if (overruled) {
             chosen = forgeIndex;
         }
@@ -148,8 +203,7 @@ public final class LlmGate {
         }
         String picked = options.get(chosen);
         String note = overruled
-                ? " (model suggested " + options.get(answer.index()) + " at " + Math.round(answer.confidence() * 100)
-                        + "% confidence, keeping standard AI choice)"
+                ? " (model leaned to " + options.get(answer.index()) + ", not clearly enough; keeping standard AI choice)"
                 : (answer.reason().isEmpty() ? "" : " (" + answer.reason() + ")");
         LlmStatus.fireFinished(who, "chose " + picked, elapsed);
         // STACK_ADD rather than INFORMATION so it shows at the default (medium) log verbosity
@@ -157,13 +211,18 @@ public final class LlmGate {
         return chosen;
     }
 
-    /** Record an answer the hook derived itself, so the same question isn't asked again this turn. */
-    public static void remember(Player ai, String cacheKey, int value) {
-        Budget b = budget(ai.getGame());
-        synchronized (b) {
-            rollTurn(b, ai.getGame());
-            b.cache.put(ai.getName() + "|" + cacheKey, value);
+    /**
+     * Should the model's pick replace the standard AI's? With per-option probabilities (Jev), the model's
+     * pick must beat the standard pick by LLM_MIN_MARGIN_PCT points; that works the same for two options
+     * or six. Without them (DeepSeek), fall back to the model's self-reported confidence.
+     */
+    static boolean overrule(Player ai, LlmAnswer answer, int forgeIndex) {
+        double[] p = answer.probabilities();
+        if (p != null && forgeIndex < p.length && answer.index() < p.length) {
+            double margin = AiProfileUtil.getIntProperty(ai, AiProps.LLM_MIN_MARGIN_PCT) / 100.0;
+            return p[answer.index()] - p[forgeIndex] >= margin - 1e-9;
         }
+        return answer.confidence() >= AiProfileUtil.getIntProperty(ai, AiProps.LLM_MIN_CONFIDENCE_PCT) / 100.0;
     }
 
     private static Budget budget(Game game) {

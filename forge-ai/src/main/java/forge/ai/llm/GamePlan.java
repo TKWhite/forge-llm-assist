@@ -16,7 +16,22 @@ import com.google.gson.JsonObject;
  * Card names are checked against the deck so a hallucinated card can't steer play.
  */
 public record GamePlan(String archetype, String summary, List<WinCondition> winConditions, List<String> keyCards,
-                       List<HoldCard> holdCards, List<String> rampPriority, Mulligan mulligan, String watchFor) {
+                       List<HoldCard> holdCards, List<String> rampPriority, Mulligan mulligan, String watchFor,
+                       List<ContextCard> contextCards) {
+
+    /** A card whose right use depends on context (dual-use, timing, modes); always decided by the model. */
+    public record ContextCard(String card, String risk, String guidance) {
+    }
+
+    /** @return the planner's guidance if this card needs judgment to play well, else null */
+    public String contextGuidance(String cardName) {
+        for (ContextCard c : contextCards) {
+            if (c.card().equalsIgnoreCase(cardName)) {
+                return c.guidance().isEmpty() ? c.risk() : c.guidance();
+            }
+        }
+        return null;
+    }
 
     public record WinCondition(List<String> cards, String how) {
     }
@@ -123,8 +138,18 @@ public record GamePlan(String archetype, String summary, List<WinCondition> winC
             JsonObject m = o.getAsJsonObject("mulligan");
             mull = new Mulligan(integer(m, "minLands", 2), integer(m, "maxLands", 5), cards(m, "wantAny", known), string(m, "keepNotes"));
         }
+        List<ContextCard> context = new ArrayList<>();
+        for (JsonElement e : array(o, "contextCards")) {
+            if (e.isJsonObject()) {
+                JsonObject c = e.getAsJsonObject();
+                String card = known.get(string(c, "card").toLowerCase(Locale.ROOT));
+                if (card != null) {
+                    context.add(new ContextCard(card, string(c, "risk"), string(c, "guidance")));
+                }
+            }
+        }
         return new GamePlan(string(o, "archetype"), string(o, "summary"), wins, cards(o, "keyCards", known), holds,
-                cards(o, "rampPriority", known), mull, string(o, "watchFor"));
+                cards(o, "rampPriority", known), mull, string(o, "watchFor"), context);
     }
 
     public JsonObject toJson() {
@@ -156,6 +181,15 @@ public record GamePlan(String archetype, String summary, List<WinCondition> winC
         m.addProperty("keepNotes", mulligan.notes());
         o.add("mulligan", m);
         o.addProperty("watchFor", watchFor);
+        JsonArray context = new JsonArray();
+        for (ContextCard c : contextCards) {
+            JsonObject j = new JsonObject();
+            j.addProperty("card", c.card());
+            j.addProperty("risk", c.risk());
+            j.addProperty("guidance", c.guidance());
+            context.add(j);
+        }
+        o.add("contextCards", context);
         return o;
     }
 

@@ -11,6 +11,7 @@ import forge.game.Game;
 import forge.game.card.Card;
 import forge.game.keyword.Keyword;
 import forge.game.phase.PhaseHandler;
+import forge.game.phase.PhaseType;
 import forge.game.player.Player;
 import forge.game.spellability.SpellAbilityStackInstance;
 import forge.game.zone.ZoneType;
@@ -37,7 +38,7 @@ public final class StateSerializer {
         sb.append("Turn ").append(ph.getTurn()).append(" (round ").append(round(game)).append("), phase ")
                 .append(ph.getPhase()).append(", active player: ")
                 .append(ph.getPlayerTurn() == null ? "-" : ph.getPlayerTurn().getName()).append('\n');
-        sb.append("You are ").append(me.getName()).append(".\n");
+        sb.append("You are ").append(me.getName()).append(". ").append(timing(me)).append('\n');
         GamePlan plan = GamePlanner.current(me);
         if (plan != null) {
             sb.append(plan.toPromptBlock());
@@ -65,6 +66,28 @@ public final class StateSerializer {
             }
         }
         return sb.toString();
+    }
+
+    /** Spelled out because "phase MAIN2" alone doesn't tell a model that a hasted creature can no longer attack. */
+    public static String timing(Player me) {
+        PhaseHandler ph = me.getGame().getPhaseHandler();
+        PhaseType phase = ph.getPhase();
+        if (phase == null) {
+            return "The game is starting.";
+        }
+        boolean mine = ph.isPlayerTurn(me);
+        String whose = mine ? "It is your turn" : "It is " + (ph.getPlayerTurn() == null ? "an opponent" : ph.getPlayerTurn().getName()) + "'s turn";
+        String combat;
+        if (phase.isBefore(PhaseType.COMBAT_BEGIN)) {
+            combat = mine ? "your combat is still to come this turn (creatures with haste could attack)"
+                    : "their combat is still to come";
+        } else if (phase.isAfter(PhaseType.COMBAT_END)) {
+            combat = mine ? "your combat is OVER for this turn (nothing more can attack until your next turn)"
+                    : "their combat is over";
+        } else {
+            combat = "combat is in progress";
+        }
+        return whose + "; " + combat + ".";
     }
 
     /** Which time around the table this is, so "turn 4" means the same thing in 2 and 4 player games. */

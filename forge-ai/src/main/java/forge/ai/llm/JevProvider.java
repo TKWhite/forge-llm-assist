@@ -115,9 +115,20 @@ public class JevProvider implements LlmProvider {
             if (root.has("usage") && root.getAsJsonObject("usage").has("input_tokens")) {
                 tokens = root.getAsJsonObject("usage").get("input_tokens").getAsInt();
             }
-            // Jev gives no prose, so the confidence stands in for the reason
-            String reason = String.format("confidence %.0f%%", confidence * 100);
-            return new LlmAnswer(picked - 1, confidence, reason, tokens, latencyMs);
+            double[] probabilities = null;
+            if (answer.has("probabilities") && answer.get("probabilities").isJsonObject()) {
+                JsonObject probs = answer.getAsJsonObject("probabilities");
+                probabilities = new double[optionCount];
+                for (int i = 0; i < optionCount; i++) {
+                    JsonElement p = probs.get(String.valueOf(i + 1));
+                    probabilities[i] = p == null || p.isJsonNull() ? 0 : p.getAsDouble();
+                }
+            }
+            // Jev gives no prose, so its probability for the pick stands in for the reason
+            String reason = probabilities != null
+                    ? String.format("%.0f%% likely", probabilities[picked - 1] * 100)
+                    : String.format("confidence %.0f%%", confidence * 100);
+            return new LlmAnswer(picked - 1, confidence, reason, tokens, latencyMs, probabilities);
         } catch (JsonParseException | IllegalStateException | ClassCastException | NullPointerException
                  | NumberFormatException | UnsupportedOperationException e) {
             throw new LlmException("unreadable answer: " + e.getMessage(), e);

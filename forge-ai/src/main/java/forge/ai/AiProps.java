@@ -169,8 +169,13 @@ public enum AiProps {
     LLM_HOOK_HOLD ("true"),
     // after holding a payoff this many turns the AI stops asking and lets the standard AI cast it
     LLM_MAX_HOLD_TURNS ("3"),
-    // the model only overrules the standard AI's own pick when at least this confident
+    // close calls: the model only overrules the standard AI's own pick when its probability for its pick
+    // beats the standard pick's by this many points (Jev), or, without probabilities, at this confidence
+    LLM_MIN_MARGIN_PCT ("10"),
     LLM_MIN_CONFIDENCE_PCT ("35"),
+    // cards the standard AI can't be trusted with are always decided by the model (no per-turn limit)
+    LLM_HOOK_ROUTED ("true"),
+    LLM_MAX_ROUTED_CALLS_GAME ("300"),
     // game plan: one planner call per deck (DeepSeek), cached in %APPDATA%/Forge/llm-plans
     LLM_PLANNER_ENABLED ("false"),
     LLM_PLANNER_MODEL ("deepseek-flash"),

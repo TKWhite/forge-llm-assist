@@ -17,9 +17,9 @@ import forge.ai.AiProfileUtil;
 import forge.ai.AiProps;
 import forge.ai.ComputerUtilCard;
 import forge.ai.ComputerUtilCost;
-import forge.ai.SpellApiToAi;
-import forge.ai.ability.CannotPlayAi;
+import forge.card.MagicColor;
 import forge.game.Game;
+import forge.game.GameLogEntryType;
 import forge.game.GameEntity;
 import forge.game.ability.ApiType;
 import forge.game.card.Card;
@@ -35,8 +35,6 @@ import forge.game.zone.ZoneType;
  * standard AI's own answer unchanged unless the gate allows a call and the call succeeds.
  */
 public final class LlmAssist {
-    private static final List<String> CAST_OPTIONS = List.of("Yes, use it now", "No, hold it for later");
-
     private LlmAssist() {
     }
 
@@ -46,92 +44,164 @@ public final class LlmAssist {
     }
 
     // ------------------------------------------------------------------
-    // Hook 1: cards the standard AI can't play (AI:RemoveDeck:All, or no AI logic for the API)
+    // Hook 1: routed cards, the ones the standard AI can't be trusted with (see RoutedCards).
+    // The model decides when to use them, their targets and their choices; the standard AI never
+    // plays them on its own.
     // ------------------------------------------------------------------
 
-    /** Spell abilities the standard AI would never use on its own. */
-    public static boolean isUnsupported(SpellAbility sa) {
-        if (sa.isLandAbility() || sa.getHostCard() == null) {
-            return false;
-        }
-        if (ComputerUtilCard.isCardRemAIDeck(sa.getHostCard())) {
-            return true;
-        }
-        return sa.getApi() != null && SpellApiToAi.Converter.get(sa) instanceof CannotPlayAi;
+    private static final List<String> MAIN1_OPTIONS = List.of(
+            "Use it now, before combat", "Use it after combat this turn", "Hold it for a later turn");
+    private static final List<String> NOW_OPTIONS = List.of("Use it now", "Hold it for a later turn");
+    private static final int USE_NOW = 0, AFTER_COMBAT = 1, LATER = 2;
+
+    public static boolean isRouted(Player ai, SpellAbility sa) {
+        return RoutedCards.isRouted(ai, sa);
     }
 
     /**
-     * Called when the standard AI found nothing it wants to do with priority on its own turn.
-     * Asks once per card per turn whether to use one of the unsupported cards now and, if it has
-     * a single simple target, which target.
+     * Routed abilities the model offers proactively (so the standard AI must not play them itself):
+     * sorcery-speed ones, and any the standard AI can't play at all. Instant-speed routed abilities stay
+     * with the standard AI, which proposes them at the right moments (e.g. in response); the model then
+     * confirms in {@link #confirmPlay}.
      */
-    public static SpellAbility playUnsupported(AiController aic, Player ai, List<SpellAbility> candidates) {
-        if (candidates.isEmpty() || !LlmGate.mayAsk(ai, AiProps.LLM_HOOK_UNSUPPORTED_CARDS)) {
+    public static boolean isProactiveRouted(Player ai, SpellAbility sa) {
+        return RoutedCards.isRouted(ai, sa)
+                && (!RoutedCards.isInstantSpeed(sa) || RoutedCards.isUnsupported(sa.getHostCard()));
+    }
+
+    /**
+     * Offer the model each routed ability it could use right now. Windows: own main phases with an empty
+     * stack, and an opponent's end step for instant-speed abilities. In the first main phase the question
+     * is "now, before combat / after combat / a later turn", so one answer covers the whole turn.
+     *
+     * @return an ability to play (targets already set), or null
+     */
+    public static SpellAbility playRouted(AiController aic, Player ai, List<SpellAbility> routed) {
+        if (routed.isEmpty() || !LlmGate.mayAsk(ai, AiProps.LLM_HOOK_ROUTED)) {
             return null;
         }
         Game game = ai.getGame();
         PhaseHandler ph = game.getPhaseHandler();
-        if (!game.getStack().isEmpty() || !ph.isPlayerTurn(ai) || !ph.getPhase().isMain()) {
+        if (ph.getPhase() == null) {
             return null;
         }
+        boolean stackEmpty = game.getStack().isEmpty();
+        SpellAbility top = stackEmpty ? null : game.getStack().peekAbility();
+        boolean opponentOnStack = top != null && top.getActivatingPlayer() != null && top.getActivatingPlayer().isOpponentOf(ai);
+        boolean ownMain = stackEmpty && ph.isPlayerTurn(ai) && ph.getPhase().isMain();
+        boolean oppEndStep = stackEmpty && !ph.isPlayerTurn(ai) && ph.is(PhaseType.END_OF_TURN);
+        if (!ownMain && !oppEndStep && !opponentOnStack) {
+            return null;
+        }
+        boolean main1 = ownMain && ph.is(PhaseType.MAIN1);
+        String window = opponentOnStack ? "stack" + top.getId() : String.valueOf(ph.getPhase());
 
-        Set<Card> seen = new HashSet<>();
-        for (SpellAbility sa : candidates) {
+        Set<String> seen = new HashSet<>();
+        for (SpellAbility sa : routed) {
             Card host = sa.getHostCard();
-            if (!seen.add(host)) {
+            String id = host.getId() + ":" + sa.getId();
+            if (!seen.add(id)) {
                 continue;
             }
-            String key = "unsupported:" + host.getId() + ":" + ph.getPhase();
-            if (LlmGate.cached(ai, key) >= 0) {
-                continue; // already asked (or tried) this turn
+            // sorcery-speed cards in own main phases; instant-speed ones (only offered here when the standard AI
+            // can't play them at all) when responding to an opponent or at an opponent's end step
+            boolean instant = RoutedCards.isInstantSpeed(sa);
+            if (instant == ownMain) {
+                continue;
+            }
+            String decisionKey = "routed:" + id + (instant ? ":" + window : "");
+            String triedKey = decisionKey + ":tried:" + window;
+            if (LlmGate.cached(ai, triedKey) >= 0) {
+                continue; // already played (or failed to) in this phase
+            }
+            int decided = LlmGate.cached(ai, decisionKey);
+            if (decided == LATER || (decided == AFTER_COMBAT && main1)) {
+                continue;
             }
             sa.setActivatingPlayer(ai);
-            if (!isSimpleEnough(sa) || !sa.canPlay() || !sa.canCastTiming(ai)
-                    || !ComputerUtilCost.canPayCost(sa, ai, false)) {
+            if (!sa.canPlay() || !sa.canCastTiming(ai) || !ComputerUtilCost.canPayCost(sa, ai, false)) {
                 continue;
+            }
+            int xValue = -1;
+            if (sa.getPayCosts() != null && sa.getPayCosts().getTotalMana().countX() > 0) {
+                xValue = ComputerUtilCost.setMaxXValue(sa, ai, false);
+                if (xValue <= 0) {
+                    continue;
+                }
             }
 
-            String what = sa.isSpell() ? "cast " + host.getName() : "activate " + host.getName() + " (" + sa + ")";
-            int answer = LlmGate.ask(ai, AiProps.LLM_HOOK_UNSUPPORTED_CARDS, "unsupported_card",
-                    "deciding whether to " + what,
-                    "The standard AI can't evaluate this card. Should you " + what + " now?",
-                    CAST_OPTIONS, List.of(host), -1, key);
-            // whatever happens, don't ask about this card again this phase
-            LlmGate.remember(ai, key, 1);
-            if (answer != 0) {
+            boolean go = decided == AFTER_COMBAT || decided == USE_NOW;
+            if (decided < 0 && askedEnough(ai, host)) {
+                // reactive cards come up at every opportunity: reuse this turn's last answer
+                go = LlmGate.cached(ai, "last:" + host.getId()) == USE_NOW;
+                decided = go ? USE_NOW : LATER;
+            }
+            if (decided < 0) {
+                String what = (sa.isSpell() ? "cast " + host.getName() : "activate " + host.getName() + " (" + sa + ")")
+                        + (xValue > 0 ? " with X=" + xValue : "");
+                int held = holdTurns(ai, host);
+                String question = "Should you " + what + "? This card needs judgment: " + RoutedCards.guidance(ai, host) + "."
+                        + (held > 0 ? " You have already held it for " + held + (held == 1 ? " turn" : " turns")
+                        + "; a card that is never used does nothing." : "");
+                List<String> options = main1 ? MAIN1_OPTIONS : NOW_OPTIONS;
+                int pick = LlmGate.askRouted(ai, "routed", "deciding whether to " + what, question,
+                        options, List.of(host), -1, decisionKey + ":q:" + (main1 ? "main1" : window));
+                if (pick < 0) {
+                    continue; // no answer: the card stays unused this phase
+                }
+                int code = main1 ? pick : (pick == 0 ? USE_NOW : LATER);
+                LlmGate.remember(ai, decisionKey, code);
+                countAsk(ai, host, code == USE_NOW);
+                if (code == LATER) {
+                    holdCounts.computeIfAbsent(game, g -> new HashMap<>()).merge(host.getId(), 1, Integer::sum);
+                }
+                go = code == USE_NOW;
+            }
+            if (!go) {
                 continue;
             }
-            if (prepareTargets(aic, ai, sa)) {
+            LlmGate.remember(ai, triedKey, 1);
+            if (prepareRoutedTargets(aic, ai, sa)) {
                 return sa;
             }
         }
         return null;
     }
 
-    /** X costs, multiple targets and targeted sub-abilities are left alone in this version. */
-    private static boolean isSimpleEnough(SpellAbility sa) {
-        if (sa.getPayCosts() != null && sa.getPayCosts().getTotalMana().countX() > 0) {
-            return false;
-        }
-        if (sa.usesTargeting() && sa.getTargetRestrictions().getMaxTargets(sa.getHostCard(), sa) != 1) {
-            return false;
-        }
-        for (AbilitySub sub = sa.getSubAbility(); sub != null; sub = sub.getSubAbility()) {
-            if (sub.usesTargeting()) {
-                return false;
-            }
-        }
-        return true;
+    /** Reactive routed cards come up at every opportunity; questions per card per turn are capped at this. */
+    private static final int MAX_ASKS_PER_CARD_TURN = 2;
+
+    private static boolean askedEnough(Player ai, Card host) {
+        return LlmGate.cached(ai, "asks:" + host.getId()) >= MAX_ASKS_PER_CARD_TURN;
     }
 
-    private static boolean prepareTargets(AiController aic, Player ai, SpellAbility sa) {
-        if (!sa.usesTargeting()) {
+    private static void countAsk(Player ai, Card host, boolean useNow) {
+        LlmGate.remember(ai, "asks:" + host.getId(), Math.max(0, LlmGate.cached(ai, "asks:" + host.getId())) + 1);
+        LlmGate.remember(ai, "last:" + host.getId(), useNow ? USE_NOW : LATER);
+    }
+
+    /**
+     * Targets for a routed ability. A single target is the model's pick from every legal target, with the
+     * standard AI's pick as a hint; multi-target and targeted sub-abilities use the standard AI's targeting.
+     */
+    private static boolean prepareRoutedTargets(AiController aic, Player ai, SpellAbility sa) {
+        boolean subTargets = false;
+        for (AbilitySub sub = sa.getSubAbility(); sub != null; sub = sub.getSubAbility()) {
+            subTargets |= sub.usesTargeting();
+        }
+        if (!sa.usesTargeting() && !subTargets) {
             return true;
         }
-        // the API logic may still be able to target even if it wouldn't choose to play the card
         sa.resetTargets();
-        if (aic.canPlaySa(sa) == AiPlayDecision.WillPlay && sa.isTargetNumberValid()) {
-            return true;
+        boolean forgeTargeted = aic.canPlaySa(sa) == AiPlayDecision.WillPlay && sa.isTargetNumberValid();
+        boolean single = sa.usesTargeting() && !subTargets
+                && sa.getTargetRestrictions().getMaxTargets(sa.getHostCard(), sa) == 1;
+        if (!single) {
+            return forgeTargeted;
+        }
+        GameEntity forgePick = forgeTargeted ? sa.getTargets().getFirstTargetedCard() : null;
+        if (forgeTargeted && forgePick == null) {
+            forgePick = sa.getTargets().getFirstTargetedPlayer();
         }
         sa.resetTargets();
 
@@ -149,27 +219,34 @@ public final class LlmAssist {
         if (targets.isEmpty()) {
             return false;
         }
-        // opponents' things first, then by value, capped
+        // opponents' things first, then by value, capped (always keeping the standard AI's pick)
         targets.sort(Comparator.comparingInt((GameEntity e) -> owner(e) == ai ? 1 : 0)
                 .thenComparing(Comparator.comparingInt(LlmAssist::value).reversed()));
         int max = Math.max(2, AiProfileUtil.getIntProperty(ai, AiProps.LLM_MAX_OPTIONS) * 2);
         if (targets.size() > max) {
-            targets = new ArrayList<>(targets.subList(0, max));
+            List<GameEntity> top = new ArrayList<>(targets.subList(0, max));
+            if (forgePick != null && !top.contains(forgePick) && targets.contains(forgePick)) {
+                top.set(top.size() - 1, forgePick);
+            }
+            targets = top;
         }
 
         GameEntity chosen;
         if (targets.size() == 1) {
             chosen = targets.get(0);
         } else {
-            List<String> options = describe(targets);
-            String key = "unsupported_target:" + sa.getHostCard().getId();
-            int pick = LlmGate.ask(ai, AiProps.LLM_HOOK_UNSUPPORTED_CARDS, "unsupported_target",
-                    "choosing a target for " + sa.getHostCard().getName(),
-                    "Choose the target for " + sa.getHostCard().getName() + ".", options, List.of(sa.getHostCard()), -1, key);
+            String name = sa.getHostCard().getName();
+            int pick = LlmGate.askRouted(ai, "routed_target", "choosing a target for " + name,
+                    "Choose the target for " + name + ".", describe(targets), List.of(sa.getHostCard()),
+                    forgePick == null ? -1 : targets.indexOf(forgePick), "routed_target:" + sa.getHostCard().getId());
             if (pick < 0) {
-                return false;
+                if (forgePick == null) {
+                    return false;
+                }
+                chosen = forgePick;
+            } else {
+                chosen = targets.get(pick);
             }
-            chosen = targets.get(pick);
         }
         sa.getTargets().add(chosen);
         if (!sa.isTargetNumberValid() || !ComputerUtilCost.canPayCost(sa, ai, false)) {
@@ -177,6 +254,96 @@ public final class LlmAssist {
             return false;
         }
         return true;
+    }
+
+    /**
+     * A choice made while a routed card resolves (copy which creature, which card, which player).
+     * The model picks from all options; "none" is offered when the choice is optional.
+     *
+     * @return the model's pick (null = choose nothing), or {@code forgePick} if no answer
+     */
+    public static <T extends GameEntity> T routedChoice(Player ai, SpellAbility sa, Iterable<T> options, T forgePick,
+                                                        boolean isOptional) {
+        if (sa == null || sa.getHostCard() == null || !RoutedCards.isRouted(ai, sa.getHostCard())
+                || !LlmGate.mayAsk(ai, AiProps.LLM_HOOK_ROUTED)) {
+            return forgePick;
+        }
+        List<T> pool = new ArrayList<>();
+        options.forEach(pool::add);
+        if (pool.isEmpty() || (pool.size() == 1 && !isOptional)) {
+            return forgePick;
+        }
+        pool.sort(Comparator.comparingInt((T e) -> value(e)).reversed());
+        int max = Math.max(2, AiProfileUtil.getIntProperty(ai, AiProps.LLM_MAX_OPTIONS) * 2);
+        if (pool.size() > max) {
+            List<T> top = new ArrayList<>(pool.subList(0, max));
+            if (forgePick != null && !top.contains(forgePick)) {
+                top.set(top.size() - 1, forgePick);
+            }
+            pool = top;
+        }
+        List<GameEntity> asEntities = new ArrayList<>(pool);
+        List<String> labels = describe(asEntities);
+        if (isOptional) {
+            labels.add("None: choose nothing");
+        }
+        Card host = sa.getHostCard();
+        int forgeIndex = forgePick == null ? (isOptional ? labels.size() - 1 : -1) : pool.indexOf(forgePick);
+        int pick = LlmGate.askRouted(ai, "routed_choice", "making a choice for " + host.getName(),
+                "You are resolving " + host.getName() + ". " + RoutedCards.guidance(ai, host) + ". What do you choose?",
+                labels, List.of(host), forgeIndex, "routed_choice:" + host.getId() + ":" + sa.getId());
+        if (pick < 0) {
+            return forgePick;
+        }
+        return pick >= pool.size() ? null : pool.get(pick);
+    }
+
+    /**
+     * A yes/no question while a routed card resolves: optional replacement effects ("you may have it enter
+     * as a copy...") and "you may" effects.
+     */
+    public static boolean routedConfirm(Player ai, Card host, String question, boolean forgeAnswer) {
+        if (host == null || !RoutedCards.isRouted(ai, host) || !LlmGate.mayAsk(ai, AiProps.LLM_HOOK_ROUTED)) {
+            return forgeAnswer;
+        }
+        String q = question == null || question.isBlank() ? "Do you want to use the optional effect?" : question;
+        int pick = LlmGate.askRouted(ai, "routed_confirm", "deciding an optional effect of " + host.getName(),
+                host.getName() + ": " + q + " " + RoutedCards.guidance(ai, host) + ".",
+                List.of("Yes", "No"), List.of(host), forgeAnswer ? 0 : 1,
+                "routed_confirm:" + host.getId() + ":" + q.hashCode());
+        return pick < 0 ? forgeAnswer : pick == 0;
+    }
+
+    /** Mode choice for routed modal cards (single-mode choices); targets for a switched mode are re-chosen. */
+    public static List<AbilitySub> routedModes(AiController aic, Player ai, SpellAbility sa, List<AbilitySub> possible,
+                                               int num, List<AbilitySub> forgeModes) {
+        if (num != 1 || possible.size() < 2 || sa.getHostCard() == null || !RoutedCards.isRouted(ai, sa.getHostCard())
+                || !LlmGate.mayAsk(ai, AiProps.LLM_HOOK_ROUTED)) {
+            return forgeModes;
+        }
+        List<String> labels = new ArrayList<>();
+        for (AbilitySub mode : possible) {
+            labels.add(mode.getDescription() == null || mode.getDescription().isBlank() ? mode.toString() : mode.getDescription());
+        }
+        AbilitySub forgeMode = forgeModes == null || forgeModes.isEmpty() ? null : forgeModes.get(0);
+        Card host = sa.getHostCard();
+        int pick = LlmGate.askRouted(ai, "routed_mode", "choosing a mode for " + host.getName(),
+                "Choose the mode for " + host.getName() + ".", labels, List.of(host),
+                forgeMode == null ? -1 : possible.indexOf(forgeMode), "routed_mode:" + host.getId() + ":" + sa.getId());
+        if (pick < 0 || possible.get(pick) == forgeMode) {
+            return forgeModes;
+        }
+        AbilitySub chosen = possible.get(pick);
+        chosen.setActivatingPlayer(ai);
+        if (chosen.usesTargeting()) {
+            chosen.resetTargets();
+            if (!aic.doTrigger(chosen, true) || !chosen.isTargetNumberValid()) {
+                return forgeModes; // the model's mode has no usable target
+            }
+        }
+        List<AbilitySub> result = new ArrayList<>();
+        result.add(chosen);
+        return result; // the engine sorts this list, so it must be mutable
     }
 
     // ------------------------------------------------------------------
@@ -336,13 +503,17 @@ public final class LlmAssist {
     // Hook 4: how hard to attack this turn
     // ------------------------------------------------------------------
 
+    /** Three broad stances; Forge's 0-5 levels are grouped into them (0-1, 2-3, 4-5). */
     private static final List<String> AGGRESSION_OPTIONS = List.of(
-            "0: stay home and block",
-            "1: only attack with creatures that can't be blocked profitably / evasive damage",
-            "2: attack where you expect to destroy blockers or go unblocked",
-            "3: attack expecting good trades or player damage",
-            "4: attack expecting to trade or damage the player",
-            "5: all-out attack, attack at all costs");
+            "Hold back: keep blockers home, only attack where it is free (evasive or unblockable damage)",
+            "Normal: attack where you expect good trades or to get damage through",
+            "Push hard: attack expecting to trade, put real pressure on this player");
+    /** the Forge level used when the model picks a stance different from Forge's */
+    private static final int[] STANCE_LEVEL = {1, 3, 5};
+
+    private static int stanceOf(int forgeLevel) {
+        return forgeLevel <= 1 ? 0 : forgeLevel <= 3 ? 1 : 2;
+    }
 
     /** Called once the standard AI settled on an aggression level for the real declare-attackers step. */
     public static int adjustAggression(Player ai, Player defender, List<Card> attackers, int forgeLevel) {
@@ -361,8 +532,9 @@ public final class LlmAssist {
         int pick = LlmGate.ask(ai, AiProps.LLM_HOOK_AGGRESSION, "aggression", "deciding how hard to attack " + defender.getName(),
                 "You are attacking " + defender.getName() + ". Possible attackers: " + String.join("; ", names)
                         + ". How aggressively should you attack this turn?",
-                AGGRESSION_OPTIONS, List.of(), forgeLevel, "aggression:" + defender.getId());
-        return pick < 0 ? forgeLevel : pick;
+                AGGRESSION_OPTIONS, List.of(), stanceOf(forgeLevel), "aggression:" + defender.getId());
+        // same stance as the standard AI: keep its finer-grained level
+        return pick < 0 || pick == stanceOf(forgeLevel) ? forgeLevel : STANCE_LEVEL[pick];
     }
 
     // ------------------------------------------------------------------
@@ -456,6 +628,30 @@ public final class LlmAssist {
         if (host == null) {
             return true;
         }
+        if (RoutedCards.isRouted(ai, sa)) {
+            // an instant-speed routed card the standard AI proposed: the model has the final say
+            if (!LlmGate.mayAsk(ai, AiProps.LLM_HOOK_ROUTED)) {
+                return true;
+            }
+            if (askedEnough(ai, host)) {
+                return LlmGate.cached(ai, "last:" + host.getId()) == USE_NOW;
+            }
+            Game game = ai.getGame();
+            SpellAbility top = game.getStack().isEmpty() ? null : game.getStack().peekAbility();
+            String what = sa.isSpell() ? "cast " + host.getName() : "activate " + host.getName() + " (" + sa + ")";
+            String context = top == null || top.getHostCard() == null ? "" : " in response to " + top.getHostCard().getName();
+            int pick = LlmGate.askRouted(ai, "routed", "deciding whether to " + what + context,
+                    "The standard AI wants to " + what + " now" + context + ". This card needs judgment: "
+                            + RoutedCards.guidance(ai, host) + ". Should you?",
+                    NOW_OPTIONS, List.of(host), 0,
+                    // once per card per turn, plus once per spell it could respond to (the standard AI proposes
+                    // instant-speed cards at every step, so a per-step key would ask over and over)
+                    "routed_now:" + host.getId() + ":" + sa.getId() + ":" + (top == null ? 0 : top.getId()));
+            if (pick >= 0) {
+                countAsk(ai, host, pick == 0);
+            }
+            return pick != 1;
+        }
         if (isWipe(sa) && LlmGate.mayAsk(ai, AiProps.LLM_HOOK_WIPE)) {
             int pick = LlmGate.ask(ai, AiProps.LLM_HOOK_WIPE, "wipe", "deciding whether to cast " + host.getName() + " now",
                     "The standard AI wants to cast the mass-removal spell " + host.getName()
@@ -521,41 +717,108 @@ public final class LlmAssist {
     }
 
     // ------------------------------------------------------------------
-    // Hook 8: mulligan (off by default)
+    // Hook 8: mulligan, decided by rule from the hand's facts (no model call)
     // ------------------------------------------------------------------
 
-    private static final List<String> MULLIGAN_OPTIONS = List.of("Keep this hand", "Mulligan");
+    /** An opening hand, worked out in code. */
+    record HandFacts(int size, int finalSize, int lands, int landColors, int ramp, int earlyPlays, int offColorPlays,
+                     boolean freeMulligan, int commanderMv) {
+    }
 
-    /** Only the first keep/mulligan decision of the game goes to the model; later ones stay standard. */
-    public static boolean keepHand(Player ai, boolean forgeKeep) {
-        if (LlmGate.cached(ai, "mulligan-asked") >= 0 || !LlmGate.mayAsk(ai, AiProps.LLM_HOOK_MULLIGAN)) {
-            return forgeKeep;
-        }
-        LlmGate.remember(ai, "mulligan-asked", 1);
-        GamePlan plan = GamePlanner.await(ai);
+    static HandFacts handFacts(Player ai, int cardsToReturn, boolean free) {
         List<Card> hand = new ArrayList<>(ai.getCardsIn(ZoneType.Hand));
-        int lands = 0;
+        int lands = 0, ramp = 0, early = 0, offColor = 0;
+        byte colors = 0;
         for (Card c : hand) {
             if (c.isLand()) {
                 lands++;
+                for (SpellAbility m : c.getManaAbilities()) {
+                    for (byte col : MagicColor.WUBRG) {
+                        if (m.canProduce(MagicColor.toLongString(col))) {
+                            colors |= col;
+                        }
+                    }
+                }
             }
         }
-        StringBuilder q = new StringBuilder("Your opening hand has ").append(hand.size()).append(" cards (")
-                .append(lands).append(" lands). Keep it or mulligan? Your commander is always available.");
-        if (plan != null) {
-            GamePlan.Mulligan m = plan.mulligan();
-            q.append(" Your plan's guidance: keep ").append(m.minLands()).append('-').append(m.maxLands()).append(" lands");
-            if (!m.wantAny().isEmpty()) {
-                q.append(", ideally with any of ").append(String.join(", ", m.wantAny()));
+        for (Card c : hand) {
+            if (c.isLand()) {
+                continue;
             }
-            if (!m.notes().isEmpty()) {
-                q.append(". ").append(m.notes());
+            boolean cheap = c.getCMC() <= 3;
+            if (cheap && isRamp(c)) {
+                ramp++;
             }
-            q.append('.');
+            if (cheap) {
+                byte needs = c.getManaCost().getColorProfile();
+                if ((needs & ~colors) == 0) {
+                    early++;
+                } else {
+                    offColor++;
+                }
+            }
         }
-        int pick = LlmGate.ask(ai, AiProps.LLM_HOOK_MULLIGAN, "mulligan", "deciding whether to mulligan",
-                q.toString(), MULLIGAN_OPTIONS, hand, forgeKeep ? 0 : 1, "mulligan");
-        return pick < 0 ? forgeKeep : pick == 0;
+        int commanderMv = 0;
+        for (Card cmd : ai.getCommanders()) {
+            commanderMv = Math.max(commanderMv, cmd.getCMC());
+        }
+        return new HandFacts(hand.size(), hand.size() - cardsToReturn, lands, Integer.bitCount(colors & 0xFF), ramp,
+                early, offColor, free, commanderMv);
+    }
+
+    /** Mana rocks and dorks, and spells that put lands onto the battlefield. */
+    private static boolean isRamp(Card c) {
+        if (!c.getManaAbilities().isEmpty()) {
+            return true;
+        }
+        for (SpellAbility sa : c.getSpellAbilities()) {
+            for (SpellAbility part = sa; part != null; part = part.getSubAbility()) {
+                if (part.getApi() == ApiType.ChangeZone && "Library".equals(part.getParam("Origin"))
+                        && part.getParamOrDefault("ChangeType", "").contains("Land")
+                        && part.getParamOrDefault("Destination", "").contains("Battlefield")) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * @return 1 keep, 0 mulligan. Deliberately conservative and rule-only: in testing, sending borderline hands
+     * to the model made the AI mulligan far too often and end up with fewer lands, not more.
+     */
+    static int mulliganRule(HandFacts h) {
+        if (h.finalSize() <= 5) {
+            return h.lands() == 0 && h.finalSize() == 5 ? 0 : 1; // going lower is worse than almost any hand
+        }
+        if (h.lands() <= 1) {
+            return 0;
+        }
+        if (h.lands() == 2) {
+            return h.ramp() == 0 && h.freeMulligan() ? 0 : 1;
+        }
+        if (h.lands() >= 6) {
+            return h.freeMulligan() || h.lands() >= 7 ? 0 : 1;
+        }
+        return 1; // 3 to 5 lands
+    }
+
+    /** Every keep/mulligan decision, by {@link #mulliganRule}. Also starts the game plan for the rest of the game. */
+    public static boolean keepHand(Player ai, boolean forgeKeep, int cardsToReturn) {
+        if (!LlmGate.hookEnabled(ai, AiProps.LLM_HOOK_MULLIGAN) || LlmGate.isEvalThread()) {
+            return forgeKeep;
+        }
+        GamePlanner.start(ai);
+        int decision = LlmGate.gameMemory(ai, "mulligan-decisions");
+        LlmGate.setGameMemory(ai, "mulligan-decisions", decision + 1);
+        // the first mulligan is free in multiplayer Commander
+        boolean free = decision == 0 && ai.getGame().getPlayers().size() > 2;
+        HandFacts facts = handFacts(ai, cardsToReturn, free);
+        int rule = mulliganRule(facts);
+        ai.getGame().getGameLog().add(GameLogEntryType.STACK_ADD, "[AI assist] " + ai.getName() + " mulligan rule: "
+                + (rule == 1 ? "keep" : "mulligan") + " (" + facts.lands() + " lands, " + facts.ramp() + " ramp, "
+                + facts.earlyPlays() + " early plays, " + facts.finalSize() + " cards" + (free ? ", free mulligan" : "") + ")");
+        return rule == 1;
     }
 
     // ------------------------------------------------------------------

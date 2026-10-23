@@ -51,6 +51,43 @@ Plans are cached as readable JSON in `%APPDATA%\Forge\llm-plans\<deck>-<hash>.js
 
 The planner needs `DEEPSEEK_API_KEY`; the executor needs `TYPESAFE_API_KEY`.
 
+## Routed cards: what the standard AI can't be trusted with
+
+Some cards always go to the model instead of Forge's AI. They are found in two ways.
+
+**From the Forge card script (no model call needed):**
+- Forge's own "AI can't play" or "AI unsure" markers
+- abilities with no AI logic
+- temporary "until end of turn" copy or animate effects
+- optional choices as a card enters or resolves
+- modal spells
+- X costs
+- extra combats
+
+**From the game plan:** its `contextCards`, i.e. dual-use or timing-sensitive cards the planner flags with one line of guidance. Example: Cursed Mirror is a mana rock, but can also become a hasted copy, which only helps when cast before combat.
+
+**What the model decides for a routed card:**
+- **When to use it.** In the first main phase it answers "now, before combat / after combat / a later turn". It's also offered instant-speed routed cards at an opponent's end step.
+- **Targets.** For single targets it picks from every legal target. Multiple targets, or targets inside a card's additional effects, still use Forge's own targeting.
+- **Choices while the card resolves:** copy targets (with a "none" option), "you may" effects, optional "enter as..." effects, and modes.
+
+The standard AI never casts a routed card on its own. Routed decisions:
+- start from turn 1
+- have no per-turn limit (`LLM_MAX_ROUTED_CALLS_GAME` is only a safety cap)
+- are not second-guessed: the model's answer stands
+
+Every prompt also states plainly whether combat is still to come or already over this turn.
+
+**Close calls** (opponent focus, targets, attack aggression with 3 options, tutors, wipes, counters) work differently: the model overrules the standard AI only if its probability for its pick beats the standard pick's by `LLM_MIN_MARGIN_PCT` (10) points. DeepSeek reports no probabilities, so it uses `LLM_MIN_CONFIDENCE_PCT` instead.
+
+**Mulligans** are worked out in code from the hand: lands, colours, ramp, plays castable by turn 3, and whether this mulligan is free (the first one is free in multiplayer).
+- **Clear-cut hands are decided by rule:**
+  - keep 3–5 lands with an early play
+  - mulligan 0–1 lands
+  - mulligan 2 lands with no ramp when the mulligan is free
+  - mulligan 6+ lands when the mulligan is free
+- **Borderline hands go to the model**, with the hand's facts and the plan's guidance.
+
 ## Setup
 
 1. Set an API key as a user environment variable:

@@ -55,6 +55,13 @@ final class LlmLog {
             line.addProperty("confidence", answer.confidence());
             line.addProperty("reason", answer.reason());
             line.addProperty("input_tokens", answer.inputTokens());
+            if (answer.probabilities() != null) {
+                JsonArray probs = new JsonArray();
+                for (double p : answer.probabilities()) {
+                    probs.add(Math.round(p * 1000) / 1000.0);
+                }
+                line.add("probabilities", probs);
+            }
         }
         if (error != null) {
             line.addProperty("error", error);

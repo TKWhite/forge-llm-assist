@@ -55,7 +55,12 @@ public final class GamePlanner {
             + "\"rampPriority\" (array of up to 6 card names to cast early), "
             + "\"mulligan\" ({\"minLands\": n, \"maxLands\": n, \"wantAny\": [card names that make a hand good], "
             + "\"keepNotes\": short guidance}), "
-            + "\"watchFor\" (one sentence on what opposing threats matter most to this deck). "
+            + "\"watchFor\" (one sentence on what opposing threats matter most to this deck), "
+            + "\"contextCards\" (array of up to 15 {\"card\": name, \"risk\": \"dual-use\"|\"timing\"|\"modes\"|\"targets\", "
+            + "\"guidance\": one sentence} for cards a simple rules-based AI would misplay because the right use depends on "
+            + "context: cards with two different uses (e.g. a mana rock that can also become a hasted copy of a creature, "
+            + "which only helps when cast before combat with a worthwhile creature to copy), effects that only last until "
+            + "end of turn, extra combats, modal spells, X spells, and cards whose value depends on what the opponents have). "
             + "Use exact card names from the decklist.";
 
     private static final ExecutorService POOL = Executors.newCachedThreadPool(r -> {
@@ -147,7 +152,10 @@ public final class GamePlanner {
         if (file.isFile()) {
             try {
                 JsonObject o = JsonParser.parseString(Files.readString(file.toPath(), StandardCharsets.UTF_8)).getAsJsonObject();
-                return GamePlan.fromJson(o, cardNames);
+                // plans written before contextCards existed are regenerated once
+                if (o.has("contextCards")) {
+                    return GamePlan.fromJson(o, cardNames);
+                }
             } catch (IOException | RuntimeException e) {
                 System.err.println("LLM planner: can't read " + file + " (" + e.getMessage() + "), regenerating");
             }
