@@ -17,6 +17,8 @@
  */
 package forge.ai;
 
+import forge.ai.llm.LlmAssist;
+
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 
@@ -1551,7 +1553,7 @@ public class AiController {
 
         if (!game.getStack().isEmpty()) {
             SpellAbility counter = chooseCounterSpell(getPlayableCounters(cards));
-            if (counter != null) return counter;
+            if (counter != null && LlmAssist.confirmCounter(player, counter)) return counter;
 
             SpellAbility counterETB = chooseSpellAbilityToPlayFromList(getPossibleETBCounters(), false);
             if (counterETB != null)
@@ -1562,6 +1564,8 @@ public class AiController {
             saList = ComputerUtilAbility.getSpellAbilities(cards, player);
         }
 
+        // cards the AI can't evaluate are set aside for the LLM assist (if enabled) to consider
+        final List<SpellAbility> unsupported = saList.stream().filter(LlmAssist::isUnsupported).collect(Collectors.toList());
         saList.removeIf(spellAbility -> {
             // don't include removedAI cards if somehow the AI can play the ability or gain control of unsupported card
             // TODO allow when experimental profile?
@@ -1578,6 +1582,18 @@ public class AiController {
 
         if (topOwnedByAI && !mustRespond && chosenSa != ComputerUtilAbility.getFirstCopySASpell(saList)) {
             return null; // not planning to copy the spell and not marked as something the AI would respond to
+        }
+
+        if (chosenSa != null && !LlmAssist.confirmPlay(player, chosenSa)) {
+            // the assist says hold this one (e.g. a board wipe), look for something else to do instead
+            final Card held = chosenSa.getHostCard();
+            saList.removeIf(sa -> sa.getHostCard() == held);
+            chosenSa = chooseSpellAbilityToPlayFromList(saList, true);
+        }
+        if (chosenSa == null) {
+            chosenSa = LlmAssist.playUnsupported(this, player, unsupported);
+        } else {
+            LlmAssist.refineTarget(player, chosenSa);
         }
 
         return chosenSa;

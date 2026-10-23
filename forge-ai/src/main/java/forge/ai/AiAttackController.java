@@ -17,6 +17,8 @@
  */
 package forge.ai;
 
+import forge.ai.llm.LlmAssist;
+
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
@@ -229,7 +231,8 @@ public class AiAttackController {
         // grows with game age since by then threat ranges become less narrow
         int threatLimit = Collections.max(threatScores.values()) - 10 - ai.getGame().getPhaseHandler().getTurn();
         threatScores.values().removeIf(e -> e < threatLimit);
-        return Aggregates.random(threatScores.keySet());
+        Player assisted = LlmAssist.chooseOpponent(ai, threatScores.keySet());
+        return assisted != null ? assisted : Aggregates.random(threatScores.keySet());
     }
 
     public static List<Card> sortAttackers(final List<Card> in) {
@@ -1271,6 +1274,8 @@ public class AiAttackController {
         } else {
             aiAggression = 0;
         } // stay at home to block
+
+        aiAggression = LlmAssist.adjustAggression(ai, defendingOpponent, this.attackers, aiAggression);
 
         if ( LOG_AI_ATTACKS )
             System.out.println(aiAggression + " = ai aggression");

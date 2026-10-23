@@ -65,6 +65,7 @@ public class VPrompt implements IVDoc<CPrompt> {
     private final FScrollPane messageScroller = new FScrollPane(tarMessage, false,
     		ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED, ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
     private final JLabel lblGames;
+    private final JLabel lblLlmStatus = new JLabel();
     private CardView card = null;
 
     public void setCardView(final CardView card) {
@@ -132,6 +133,7 @@ public class VPrompt implements IVDoc<CPrompt> {
         }
         lblGames.setText(localizer.getMessage("lblGameSetup"));
 
+        container.add(lblLlmStatus, "span 2, w 10:100%, h 22px!, hidemode 3");
         container.add(messageScroller, "span 2, w 10:100%, h 0:100%");
 
         boolean largerButtons = prefs.getPrefBoolean(FPref.UI_TOUCHSCREEN_OPTIMIZE);
@@ -196,6 +198,11 @@ public class VPrompt implements IVDoc<CPrompt> {
     /** @return {@link javax.swing.JTextArea} */
     public FHtmlViewer getTarMessage() {
         return this.tarMessage;
+    }
+
+    /** @return label showing when an AI player is waiting on the LLM assist */
+    public JLabel getLblLlmStatus() {
+        return this.lblLlmStatus;
     }
 
     /** @return {@link javax.swing.JLabel} */

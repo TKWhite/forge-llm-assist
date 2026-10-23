@@ -1,5 +1,7 @@
 package forge.ai;
 
+import forge.ai.llm.LlmAssist;
+
 import com.google.common.collect.*;
 import forge.LobbyPlayer;
 import forge.StaticData;
@@ -338,7 +340,8 @@ public class PlayerControllerAi extends PlayerController {
         if (delayedReveal != null) {
             reveal(delayedReveal);
         }
-        return SpellApiToAi.Converter.get(sa).chooseSingleEntity(player, sa, optionList, isOptional, targetedPlayer, params);
+        T choice = SpellApiToAi.Converter.get(sa).chooseSingleEntity(player, sa, optionList, isOptional, targetedPlayer, params);
+        return LlmAssist.refineEntity(player, sa, optionList, choice);
     }
 
     @Override
@@ -771,7 +774,7 @@ public class PlayerControllerAi extends PlayerController {
 
     @Override
     public boolean mulliganKeepHand(Player firstPlayer, int cardsToReturn)  {
-        return !ComputerUtil.wantMulligan(player, cardsToReturn);
+        return LlmAssist.keepHand(player, !ComputerUtil.wantMulligan(player, cardsToReturn));
     }
 
     @Override
@@ -1576,7 +1579,8 @@ public class PlayerControllerAi extends PlayerController {
         if (delayedReveal != null) {
             reveal(delayedReveal);
         }
-        return brains.chooseCardToHiddenOriginChangeZone(destination, origin, sa, fetchList, player, decider);
+        Card choice = brains.chooseCardToHiddenOriginChangeZone(destination, origin, sa, fetchList, player, decider);
+        return LlmAssist.refineTutor(player, sa, origin, destination, fetchList, choice, decider);
     }
 
     @Override

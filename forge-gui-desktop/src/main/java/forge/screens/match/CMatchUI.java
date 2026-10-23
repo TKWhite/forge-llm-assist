@@ -17,6 +17,8 @@
  */
 package forge.screens.match;
 
+import forge.ai.llm.LlmStatus;
+
 import java.awt.*;
 import java.awt.event.KeyEvent;
 import java.awt.event.MouseEvent;
@@ -181,6 +183,7 @@ public final class CMatchUI
     private final CDock cDock = new CDock(this);
     private final CLog cLog = new CLog(this);
     private final CPrompt cPrompt = new CPrompt(this);
+    private final LlmStatusIndicator llmStatus = new LlmStatusIndicator(cPrompt.getView().getLblLlmStatus());
     private final CStack cStack = new CStack(this);
     private int nextNotifiableStackIndex = 0;
     private String lastPromptMessage = "";
@@ -1209,6 +1212,7 @@ public final class CMatchUI
     public void openView(final TrackableCollection<PlayerView> myPlayers) {
         final GameView gameView = getGameView();
         gameView.getGameLog().addObserver(cLog);
+        LlmStatus.addListener(llmStatus);
 
         // Sort players
         FCollectionView<PlayerView> players = gameView.getPlayers();
@@ -1306,6 +1310,8 @@ public final class CMatchUI
     @Override
     public void afterGameEnd() {
         super.afterGameEnd();
+        LlmStatus.removeListener(llmStatus);
+        llmStatus.dispose();
         Singletons.getView().getLpnDocument().remove(targetingOverlay.getPanel());
         FThreads.invokeInEdtNowOrLater(() -> {
             Singletons.getView().getNavigationBar().closeTab(screen);

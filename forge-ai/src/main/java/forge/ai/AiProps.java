@@ -147,7 +147,25 @@ public enum AiProps {
     SIDEBOARDING_CHANCE_ON_WIN("0"),
     SIDEBOARDING_IN_LIMITED_FORMATS("false"),
     SIDEBOARDING_SHARED_TYPE_ONLY("false"),
-    SIDEBOARDING_PLANESWALKER_EQ_CREATURE("false");
+    SIDEBOARDING_PLANESWALKER_EQ_CREATURE("false"),
+    // LLM assist: hand selected hard decisions to an external model (see forge.ai.llm)
+    LLM_ENABLED ("false"),
+    LLM_PROVIDER ("deepseek"),
+    LLM_MODEL ("deepseek-flash"),
+    LLM_MIN_ROUND ("4"),
+    LLM_MAX_CALLS_GAME ("40"),
+    LLM_MAX_CALLS_TURN ("3"),
+    LLM_TIMEOUT_MS ("4000"),
+    LLM_CLOSENESS_PCT ("15"),
+    LLM_MAX_OPTIONS ("6"),
+    LLM_HOOK_UNSUPPORTED_CARDS ("true"),
+    LLM_HOOK_DEFENDER ("true"),
+    LLM_HOOK_TARGETS ("true"),
+    LLM_HOOK_AGGRESSION ("true"),
+    LLM_HOOK_TUTOR ("true"),
+    LLM_HOOK_WIPE ("true"),
+    LLM_HOOK_COUNTER ("true"),
+    LLM_HOOK_MULLIGAN ("false");
     // Experimental features, must be promoted or removed after extensive testing and, ideally, defaulting
     // <-- There are no experimental options here -->
 
