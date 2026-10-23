@@ -31,7 +31,7 @@ LLM_MAX_HOLD_TURNS=3
 LLM_MIN_CONFIDENCE_PCT=35
 # Game plan (one DeepSeek call per deck, then cached)
 LLM_PLANNER_ENABLED=true
-LLM_PLANNER_MODEL=deepseek-v4-pro
+LLM_PLANNER_MODEL=deepseek-flash
 LLM_PLANNER_TIMEOUT_MS=90000
 # How long the first mulligan waits for a brand-new deck's plan
 LLM_PLAN_WAIT_MS=30000

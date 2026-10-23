@@ -45,7 +45,7 @@ Jev then makes the fast in-game decisions with that plan in mind:
 - **Confidence floor:** Jev only overrules the standard AI's own pick when it is at least `LLM_MIN_CONFIDENCE_PCT` (35%) confident.
 
 Plans are cached as readable JSON in `%APPDATA%\Forge\llm-plans\<deck>-<hash>.json`:
-- Only the first game with a deck makes the planner call (about 30–45 s with `deepseek-v4-pro`; the first mulligan waits up to `LLM_PLAN_WAIT_MS` for it).
+- Only the first game with a deck makes the planner call (with `deepseek-flash` by default, set by `LLM_PLANNER_MODEL`; the first mulligan waits up to `LLM_PLAN_WAIT_MS` for it).
 - You can edit a plan by hand. Delete the file to regenerate it.
 - A changed decklist gets a new plan.
 
