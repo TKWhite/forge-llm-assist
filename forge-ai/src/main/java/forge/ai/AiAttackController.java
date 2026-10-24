@@ -912,16 +912,26 @@ public class AiAttackController {
             );
             List<Callable<Integer>> tasks = new ArrayList<>();
 
-            for (final Card attacker : this.attackers) {
+            // creatures that can't attack the chosen defender may still have to attack someone else (a creature
+            // goaded by the chosen defender); leaving them out makes the whole declaration illegal
+            final List<Card> mayBeForced = new ArrayList<>(this.attackers);
+            for (Card c : myList) {
+                if (!mayBeForced.contains(c) && combat.getAttackConstraints().getRequirements().get(c) != null) {
+                    mayBeForced.add(c);
+                }
+            }
+            for (final Card attacker : mayBeForced) {
                 final GameEntity finalDefender = defender;
+                final boolean canAttackDefender = this.attackers.contains(attacker);
                 tasks.add(() -> {
                     GameEntity mustAttackDef = null;
-                    if (attacker.getSVar("MustAttack").equals("True")) {
+                    // one that can't attack the chosen defender goes by its requirements alone
+                    if (canAttackDefender && attacker.getSVar("MustAttack").equals("True")) {
                         mustAttackDef = finalDefender;
-                    } else if (attacker.hasSVar("EndOfTurnLeavePlay")
+                    } else if (canAttackDefender && attacker.hasSVar("EndOfTurnLeavePlay")
                             && isEffectiveAttacker(ai, attacker, combat, finalDefender)) {
                         mustAttackDef = finalDefender;
-                    } else if (seasonOfTheWitch) {
+                    } else if (canAttackDefender && seasonOfTheWitch) {
                         //TODO: if there are other ways to tap this creature (like mana creature), then don't need to attack
                         mustAttackDef = finalDefender;
                     } else {

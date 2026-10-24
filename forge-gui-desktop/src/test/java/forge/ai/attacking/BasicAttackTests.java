@@ -76,6 +76,37 @@ public class BasicAttackTests extends SimulationTest {
         AssertJUnit.assertEquals("the flyer goes for the kill", weak, combat.getDefenderByAttacker(angel));
     }
 
+    /**
+     * A goaded creature must attack someone other than the goading player. When the AI's preferred defender is the
+     * goader, its declaration must still be legal (the engine otherwise throws the whole plan away and declares only
+     * the forced attackers).
+     */
+    @Test
+    public void goadedCreatureAttacksSomeoneElse() {
+        Game game = initAndCreateThreePlayerGame();
+        Player goader = game.getPlayers().get(0);
+        Player attacker = game.getPlayers().get(1);
+        Player other = game.getPlayers().get(2);
+        goader.setTeam(0);
+        attacker.setTeam(1);
+        other.setTeam(2);
+
+        goader.setLife(4, null); // the obvious target
+        Card bear = addCard("Grizzly Bears", attacker);
+        bear.setSickness(false);
+        bear.addGoad(game.getNextTimestamp(), goader);
+        Card angel = addCard("Serra Angel", attacker);
+        angel.setSickness(false);
+
+        game.getPhaseHandler().devModeSet(PhaseType.MAIN1, attacker);
+        playUntilPhase(game, PhaseType.COMBAT_DECLARE_BLOCKERS);
+
+        Combat combat = game.getCombat();
+        AssertJUnit.assertNotNull(combat);
+        AssertJUnit.assertEquals(other, combat.getDefenderByAttacker(bear));
+        AssertJUnit.assertEquals("the angel still goes for the kill", goader, combat.getDefenderByAttacker(angel));
+    }
+
     @Test
     public void assaultWhenAheadIncludesTrade() {
         Game game = initAndCreateGame();
