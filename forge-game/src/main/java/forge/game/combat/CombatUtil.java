@@ -752,11 +752,13 @@ public class CombatUtil {
         final CardCollection requirementCards = new CardCollection();
         final Player defender = blocker.getController();
         for (final Card attacker : attackers) {
-            if (getBlockCost(blocker.getGame(), blocker, attacker) != null) {
+            // the lure check only reads the attacker's keywords while the block cost scans every
+            // static ability in the game, so rule out the usual attacker without a lure first
+            if (attackerLureSatisfied(attacker, blocker, combat.getBlockers(attacker))) {
                 continue;
             }
 
-            if (attackerLureSatisfied(attacker, blocker, combat.getBlockers(attacker))) {
+            if (getBlockCost(blocker.getGame(), blocker, attacker) != null) {
                 continue;
             }
 

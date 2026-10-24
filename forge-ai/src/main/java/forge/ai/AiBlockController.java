@@ -593,36 +593,72 @@ public class AiBlockController {
      * @param combat a {@link forge.game.combat.Combat} object.
      */
     private void makeTradeBlocks(final Combat combat) {
-        List<Card> killingBlockers;
-        boolean needsRefresh = false;
+        final List<Card> attackers = Lists.newArrayList(attackersLeft);
+        int next = 0;
 
-        for (final Card attacker : Lists.newArrayList(attackersLeft)) {
-            if (CombatUtil.getMinNumBlockersForAttacker(attacker, combat.getDefenderPlayerByAttacker(attacker)) > 1) {
-                continue;
-            }
-            if (ComputerUtilCombat.attackerHasThreateningAfflict(attacker, ai)) {
-                continue;
-            }
-
-            List<Card> possibleBlockers = getPossibleBlockers(combat, attacker, blockersLeft, true);
-            killingBlockers = getKillingBlockers(combat, attacker, possibleBlockers);
-
-            if (!killingBlockers.isEmpty()) {
-                final Card blocker = ComputerUtilCard.getWorstCreatureAI(killingBlockers);
-
-                if (lifeInDanger && needsRefresh) {
-                    // is it very likely to end up in danger again if we weren't already?
-                    lifeInDanger = ComputerUtilCombat.lifeInDanger(ai, combat);
-                }
-
-                // Randomly trade creatures with lower power and [hopefully] worse abilities, if enabled in profile
-                if (lifeInDanger || wouldLikeToRandomlyTrade(attacker, blocker, combat)) {
+        if (lifeInDanger) {
+            // while life is in danger every trade is made until it no longer is: as with chump
+            // blocks, lay the trades out first and search for the shortest safe prefix
+            final List<Card[]> trades = new ArrayList<>();
+            final List<Integer> tradeIndex = new ArrayList<>();
+            for (int i = 0; i < attackers.size(); i++) {
+                final Card attacker = attackers.get(i);
+                final Card blocker = getTradeBlocker(combat, attacker);
+                if (blocker != null) {
                     combat.addBlocker(attacker, blocker);
-                    attackersLeft.remove(attacker);
-                    needsRefresh = true;
+                    trades.add(new Card[] {attacker, blocker});
+                    tradeIndex.add(i);
                 }
+            }
+            next = attackers.size();
+
+            int needed = trades.size();
+            int applied = trades.size();
+            if (!trades.isEmpty() && !ComputerUtilCombat.lifeInDanger(ai, combat)) {
+                lifeInDanger = false;
+                int lo = 1;
+                int hi = trades.size();
+                while (lo < hi) {
+                    final int mid = (lo + hi) / 2;
+                    applied = applyBlocks(combat, trades, applied, mid);
+                    if (ComputerUtilCombat.lifeInDanger(ai, combat)) {
+                        lo = mid + 1;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                needed = lo;
+                next = tradeIndex.get(needed - 1) + 1;
+            }
+            applyBlocks(combat, trades, applied, needed);
+            for (Card[] trade : trades.subList(0, needed)) {
+                attackersLeft.remove(trade[0]);
             }
         }
+
+        for (int i = next; i < attackers.size(); i++) {
+            final Card attacker = attackers.get(i);
+            final Card blocker = getTradeBlocker(combat, attacker);
+            // Randomly trade creatures with lower power and [hopefully] worse abilities, if enabled in profile
+            if (blocker != null && wouldLikeToRandomlyTrade(attacker, blocker, combat)) {
+                combat.addBlocker(attacker, blocker);
+                attackersLeft.remove(attacker);
+            }
+        }
+    }
+
+    // the worst creature that can block and kill the attacker on its own, if any
+    private Card getTradeBlocker(final Combat combat, final Card attacker) {
+        if (CombatUtil.getMinNumBlockersForAttacker(attacker, combat.getDefenderPlayerByAttacker(attacker)) > 1) {
+            return null;
+        }
+        if (ComputerUtilCombat.attackerHasThreateningAfflict(attacker, ai)) {
+            return null;
+        }
+
+        List<Card> possibleBlockers = getPossibleBlockers(combat, attacker, blockersLeft, true);
+        List<Card> killingBlockers = getKillingBlockers(combat, attacker, possibleBlockers);
+        return killingBlockers.isEmpty() ? null : ComputerUtilCard.getWorstCreatureAI(killingBlockers);
     }
 
     // Chump Blocks (should only be made if life is in danger)
@@ -636,67 +672,100 @@ public class AiBlockController {
         }
     }
 
+    // The chump blocks come in a fixed order that doesn't depend on the danger check, only where
+    // they stop does: chump until life is out of danger. lifeInDanger runs a full combat damage
+    // prediction, so lay out the whole sequence first and search for the shortest safe prefix
+    // instead of re-predicting after every block - against a swarm of hundreds of attackers the
+    // one-check-per-block loop outran the AI's time limit.
     private void makeChumpBlocks(final Combat combat, List<Card> attackers) {
-        makeChumpBlocks(combat, attackers, true);
-    }
-
-    // recheckDanger: lifeInDanger runs a full combat damage prediction, so only
-    // re-evaluate it when a blocker was assigned since the last check - skipping
-    // an attacker leaves the combat unchanged and the previous result still holds
-    private void makeChumpBlocks(final Combat combat, List<Card> attackers, boolean recheckDanger) {
-        if (recheckDanger && !ComputerUtilCombat.lifeInDanger(ai, combat)) {
+        if (!ComputerUtilCombat.lifeInDanger(ai, combat)) {
             lifeInDanger = false;
             return;
         }
-        if (attackers.isEmpty()) {
-            return;
-        }
 
-        Card attacker = attackers.get(0);
+        final List<Card[]> chumps = new ArrayList<>();
+        while (!attackers.isEmpty()) {
+            Card attacker = attackers.get(0);
 
-        if (CombatUtil.getMinNumBlockersForAttacker(attacker, combat.getDefenderPlayerByAttacker(attacker)) > 1
-            || StaticAbilityAssignCombatDamageAsUnblocked.assignCombatDamageAsUnblocked(attacker)
-            || ComputerUtilCombat.attackerHasThreateningAfflict(attacker, ai)) {
-            attackers.remove(0);
-            makeChumpBlocks(combat, attackers, false);
-            return;
-        }
+            if (CombatUtil.getMinNumBlockersForAttacker(attacker, combat.getDefenderPlayerByAttacker(attacker)) > 1
+                || StaticAbilityAssignCombatDamageAsUnblocked.assignCombatDamageAsUnblocked(attacker)
+                || ComputerUtilCombat.attackerHasThreateningAfflict(attacker, ai)) {
+                attackers.remove(0);
+                continue;
+            }
 
-        List<Card> chumpBlockers = getPossibleBlockers(combat, attacker, blockersLeft, true);
-        if (attacker.hasKeyword(Keyword.TRAMPLE)) {
-            // a blocker that dies before combat damage soaks up none of it, so a trampling
-            // attacker connects for full anyway and the chump block is spent for nothing
-            chumpBlockers.removeIf(c -> ComputerUtilCombat.shieldDamage(attackers.get(0), c) == 0);
-        }
-        if (!chumpBlockers.isEmpty()) {
-            final Card blocker = ComputerUtilCard.getWorstCreatureAI(chumpBlockers);
-
-            // check if it's better to block a creature with lower power and without trample
+            List<Card> chumpBlockers = getPossibleBlockers(combat, attacker, blockersLeft, true);
             if (attacker.hasKeyword(Keyword.TRAMPLE)) {
-                final int damageAbsorbed = blocker.getLethalDamage();
-                if (attacker.getNetCombatDamage() > damageAbsorbed) {
-                    for (Card other : attackers) {
-                        if (other.equals(attacker)) {
-                            continue;
-                        }
-                        if (other.getNetCombatDamage() >= damageAbsorbed
-                                && !other.hasKeyword(Keyword.TRAMPLE)
-                                && !StaticAbilityAssignCombatDamageAsUnblocked.assignCombatDamageAsUnblocked(other)
-                                && !ComputerUtilCombat.attackerHasThreateningAfflict(other, ai)
-                                && CombatUtil.canBlock(other, blocker, combat)) {
-                            attacker = other;
-                            break;
+                // a blocker that dies before combat damage soaks up none of it, so a trampling
+                // attacker connects for full anyway and the chump block is spent for nothing
+                final Card trampler = attacker;
+                chumpBlockers.removeIf(c -> ComputerUtilCombat.shieldDamage(trampler, c) == 0);
+            }
+            if (!chumpBlockers.isEmpty()) {
+                final Card blocker = ComputerUtilCard.getWorstCreatureAI(chumpBlockers);
+
+                // check if it's better to block a creature with lower power and without trample
+                if (attacker.hasKeyword(Keyword.TRAMPLE)) {
+                    final int damageAbsorbed = blocker.getLethalDamage();
+                    if (attacker.getNetCombatDamage() > damageAbsorbed) {
+                        for (Card other : attackers) {
+                            if (other.equals(attacker)) {
+                                continue;
+                            }
+                            if (other.getNetCombatDamage() >= damageAbsorbed
+                                    && !other.hasKeyword(Keyword.TRAMPLE)
+                                    && !StaticAbilityAssignCombatDamageAsUnblocked.assignCombatDamageAsUnblocked(other)
+                                    && !ComputerUtilCombat.attackerHasThreateningAfflict(other, ai)
+                                    && CombatUtil.canBlock(other, blocker, combat)) {
+                                attacker = other;
+                                break;
+                            }
                         }
                     }
                 }
-            }
 
-            combat.addBlocker(attacker, blocker);
-            attackersLeft.remove(attacker);
-            blockedButUnkilled.add(attacker);
+                combat.addBlocker(attacker, blocker);
+                chumps.add(new Card[] {attacker, blocker});
+            }
+            attackers.remove(attacker);
         }
-        attackers.remove(attacker);
-        makeChumpBlocks(combat, attackers, !chumpBlockers.isEmpty());
+
+        // every chump block is in place: if that still isn't enough, all of them are kept
+        int needed = chumps.size();
+        int applied = chumps.size();
+        if (!chumps.isEmpty() && !ComputerUtilCombat.lifeInDanger(ai, combat)) {
+            lifeInDanger = false;
+            int lo = 1;
+            int hi = chumps.size();
+            while (lo < hi) {
+                final int mid = (lo + hi) / 2;
+                applied = applyBlocks(combat, chumps, applied, mid);
+                if (ComputerUtilCombat.lifeInDanger(ai, combat)) {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            needed = lo;
+        }
+        applyBlocks(combat, chumps, applied, needed);
+        for (Card[] chump : chumps.subList(0, needed)) {
+            attackersLeft.remove(chump[0]);
+            blockedButUnkilled.add(chump[0]);
+        }
+    }
+
+    // puts the first target blocks of the sequence in the combat, given the first applied of them are there now
+    private static int applyBlocks(final Combat combat, final List<Card[]> blocks, int applied, final int target) {
+        for (; applied > target; applied--) {
+            final Card[] chump = blocks.get(applied - 1);
+            combat.removeBlockAssignment(chump[0], chump[1]);
+        }
+        for (; applied < target; applied++) {
+            final Card[] chump = blocks.get(applied);
+            combat.addBlocker(chump[0], chump[1]);
+        }
+        return applied;
     }
 
     // Block creatures with "can't be blocked except by two or more creatures"

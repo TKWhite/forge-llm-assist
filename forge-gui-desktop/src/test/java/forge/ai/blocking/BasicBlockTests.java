@@ -110,4 +110,41 @@ public class BasicBlockTests extends SimulationTest {
                 2, blockersAgainst("Craw Wurm", "Menace", 20, "Wall of Stone", 2));
     }
 
+    // A Scute Swarm deck can attack with hundreds of copies: every "can this creature block that
+    // one" check used to scan the static abilities of the whole game once per attacker, and every
+    // trade or chump block re-ran a full damage prediction, so one blocking decision took longer
+    // than the AI's time limit.
+    @Test
+    public void blockingASwarmFinishesQuickly() {
+        Game game = initAndCreateGame();
+        Player attacker = game.getPlayers().get(1);
+        Player defender = game.getPlayers().get(0);
+
+        defender.setLife(20, null);
+
+        Combat combat = new Combat(attacker);
+        for (int i = 0; i < 300; i++) {
+            Card scute = addCard("Scute Swarm", attacker);
+            scute.setSickness(false);
+            combat.addAttacker(scute, defender);
+        }
+        for (int i = 0; i < 15; i++) {
+            addCard("Grizzly Bears", defender);
+        }
+
+        game.getPhaseHandler().devModeSet(PhaseType.COMBAT_DECLARE_ATTACKERS, attacker);
+        game.getAction().checkStateEffects(true);
+        game.getPhaseHandler().setCombat(combat);
+
+        long start = System.currentTimeMillis();
+        ((PlayerControllerAi) attacker.getController()).getAi().declareBlockersFor(defender, combat);
+        long elapsed = System.currentTimeMillis() - start;
+        System.out.println("Blocking 300 attackers took " + elapsed + " ms");
+
+        AssertJUnit.assertEquals("AI should block with every bear against lethal", 15,
+                combat.getAllBlockers().size());
+        // was about 7.5 seconds
+        AssertJUnit.assertTrue("Blocking 300 attackers took " + elapsed + " ms", elapsed < 5000);
+    }
+
 }
