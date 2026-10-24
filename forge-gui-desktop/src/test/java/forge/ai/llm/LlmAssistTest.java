@@ -472,6 +472,31 @@ public class LlmAssistTest extends AITest {
         }
     }
 
+    /**
+     * The X the model approves is the X cast, and the target question says what X is. In a test match the model
+     * approved Worldsoul's Rage with X=21 and the standard AI's targeting check (DamageDealAi: "if I can kill my
+     * target by paying less mana, do it") cut it to X=3 for a 3/3; that path doesn't trigger in a bare test game.
+     */
+    @Test
+    public void approvedXIsTheXCast() {
+        FakeProvider provider = new FakeProvider(0); // use it now; first target offered
+        Game game = setUpGame("LlmAssisted", 13, provider);
+        addCardToZone("Blaze", ai, ZoneType.Hand);
+        for (int i = 0; i < 7; i++) {
+            addCard("Mountain", ai);
+        }
+        addCard("Grizzly Bears", opponentA);
+
+        playUntilPhase(game, PhaseType.COMBAT_BEGIN);
+
+        AssertJUnit.assertTrue("offered with X=6: " + provider.questions,
+                provider.questions.stream().anyMatch(q -> q.contains("cast Blaze with X=6")));
+        AssertJUnit.assertTrue("the target question names X: " + provider.questions,
+                provider.questions.stream().anyMatch(q -> q.startsWith("Choose the target for Blaze with X=6")));
+        AssertJUnit.assertTrue("cast with X=6: " + game.getGameLog().getLogEntries(null), game.getGameLog().getLogEntries(null)
+                .stream().anyMatch(e -> e.message().contains("Blaze") && e.message().contains("deals 6 damage")));
+    }
+
     /** The model picks which free permanent Genesis Hydra puts onto the battlefield, not whether to take one. */
     @Test
     public void noChooseNothingUnlessTheChoiceIsTheJudgmentCall() {

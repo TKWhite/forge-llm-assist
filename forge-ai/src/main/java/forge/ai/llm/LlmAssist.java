@@ -208,7 +208,7 @@ public final class LlmAssist {
                 // one "use it" covers one activation: an equip approved before combat isn't repeated after it
                 LlmGate.remember(ai, decisionKey, ASK_AGAIN);
             }
-            if (prepareRoutedTargets(aic, ai, sa)) {
+            if (prepareRoutedTargets(aic, ai, sa, xValue)) {
                 return sa;
             }
         }
@@ -270,7 +270,7 @@ public final class LlmAssist {
             for (SpellAbility sa : abilities) {
                 if (sa.getId() == decided) {
                     LlmGate.remember(ai, key, LOYALTY_NONE); // one try: a failed activation isn't retried
-                    if (prepareRoutedTargets(aic, ai, sa)) {
+                    if (prepareRoutedTargets(aic, ai, sa, -1)) {
                         return sa;
                     }
                 }
@@ -385,7 +385,7 @@ public final class LlmAssist {
      * Targets for a routed ability. A single target is the model's pick from every legal target, with the
      * standard AI's pick as a hint; multi-target and targeted sub-abilities use the standard AI's targeting.
      */
-    private static boolean prepareRoutedTargets(AiController aic, Player ai, SpellAbility sa) {
+    private static boolean prepareRoutedTargets(AiController aic, Player ai, SpellAbility sa, int xValue) {
         boolean subTargets = false;
         for (AbilitySub sub = sa.getSubAbility(); sub != null; sub = sub.getSubAbility()) {
             subTargets |= sub.usesTargeting();
@@ -395,6 +395,11 @@ public final class LlmAssist {
         }
         sa.resetTargets();
         boolean forgeTargeted = aic.canPlaySa(sa) == AiPlayDecision.WillPlay && sa.isTargetNumberValid();
+        // the standard AI's check sets X to what it would pay (just enough to kill its target); the model was
+        // asked about the X it approved, so that's the X cast
+        if (xValue > 0) {
+            sa.getRootAbility().setXManaCostPaid(xValue);
+        }
         boolean single = sa.usesTargeting() && !subTargets
                 && sa.getTargetRestrictions().getMaxTargets(sa.getHostCard(), sa) == 1;
         if (!single) {
@@ -443,7 +448,8 @@ public final class LlmAssist {
         } else {
             String name = sa.getHostCard().getName();
             int pick = LlmGate.askRouted(ai, "routed_target", "choosing a target for " + name,
-                    "Choose the target for " + name + ".", describe(targets), List.of(sa.getHostCard()),
+                    "Choose the target for " + name + (xValue > 0 ? " with X=" + xValue : "") + ".", describe(targets),
+                    List.of(sa.getHostCard()),
                     forgePick == null ? -1 : targets.indexOf(forgePick), "routed_target:" + sa.getHostCard().getId());
             if (pick < 0) {
                 if (forgePick == null) {
