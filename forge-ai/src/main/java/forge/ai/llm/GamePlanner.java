@@ -51,7 +51,10 @@ public final class GamePlanner {
             + "\"keyCards\" (array of up to 8 card names: engines and payoffs worth tutoring for), "
             + "\"holdCards\" (array of {\"card\": name, \"castWhen\": short condition} for up to 8 payoffs, finishers, "
             + "board wipes or one-shot effects that should NOT be cast as soon as they are affordable; do not list "
-            + "ramp, card draw or cheap creatures that should simply be cast on curve), "
+            + "ramp, card draw or cheap creatures that should simply be cast on curve; castWhen is a board state that "
+            + "can come about on a later turn, e.g. \"an opponent has 3+ creatures\"; a card that is only better later in "
+            + "the same turn, e.g. after combat, is not a hold card, give it a contextCards entry instead; do not hold the "
+            + "commander unless casting it early is actively harmful, since its ability only works on the battlefield), "
             + "\"rampPriority\" (array of up to 6 card names to cast early), "
             + "\"mulligan\" ({\"minLands\": n, \"maxLands\": n, \"wantAny\": [card names that make a hand good], "
             + "\"keepNotes\": short guidance}), "
@@ -61,7 +64,9 @@ public final class GamePlanner {
             + "context: cards with two different uses (e.g. a mana rock that can also become a hasted copy of a creature, "
             + "which only helps when cast before combat with a worthwhile creature to copy), effects that only last until "
             + "end of turn, extra combats, modal spells, X spells, and cards whose value depends on what the opponents have). "
-            + "Use exact card names from the decklist.";
+            + "Use exact card names from the decklist. Read each card's rules text exactly: an X in an ability may be a "
+            + "count (e.g. the mana spent to cast it) rather than a cost you choose. Only list win conditions this "
+            + "decklist can realistically assemble.";
 
     private static final ExecutorService POOL = Executors.newCachedThreadPool(r -> {
         Thread t = new Thread(r, "LLM planner");

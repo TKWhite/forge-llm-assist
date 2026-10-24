@@ -329,6 +329,57 @@ public class LlmAssistTest extends AITest {
         AssertJUnit.assertNull(LlmAssist.routedChoice(ai, mirror, options, options.get(0), true));
     }
 
+    /** Blight Grenade's "all creatures get -3/-3" killed its caster's board in a test match; it is a wipe. */
+    @Test
+    public void wipesIncludeShrinkAllRiders() {
+        setUpGame("LlmAssisted", 13, new FakeProvider(0));
+        AssertJUnit.assertTrue(LlmAssist.isWipe(addCardToZone("Blight Grenade", ai, ZoneType.Hand).getFirstSpellAbility()));
+        AssertJUnit.assertTrue(LlmAssist.isWipe(addCardToZone("Infest", ai, ZoneType.Hand).getFirstSpellAbility()));
+        AssertJUnit.assertFalse("one-sided", LlmAssist.isWipe(addCardToZone("Cower in Fear", ai, ZoneType.Hand).getFirstSpellAbility()));
+        AssertJUnit.assertFalse(LlmAssist.isWipe(addCardToZone("Doom Blade", ai, ZoneType.Hand).getFirstSpellAbility()));
+    }
+
+    /**
+     * Each player chooses for an opponent's Eye of Doom. The question must say whose card it is and what the choice
+     * does, without the controller's routing notes; in a test match a player put a doom counter on its own commander.
+     */
+    @Test
+    public void choiceForSomeoneElsesCardSaysWhose() {
+        FakeProvider provider = new FakeProvider(0);
+        setUpGame("LlmAssisted", 13, provider);
+        Card eye = addCard("Eye of Doom", opponentA);
+        SpellAbility trigger = eye.getTriggers().get(0).ensureAbility();
+        List<Card> options = List.of(addCard("Grizzly Bears", ai), addCard("Sol Ring", opponentA));
+
+        LlmAssist.routedChoice(ai, trigger, options, options.get(1), false);
+        String q = provider.questions.get(0);
+        AssertJUnit.assertTrue(q, q.startsWith(opponentA.getName() + "'s Eye of Doom"));
+        AssertJUnit.assertTrue(q, q.contains("doom counter"));
+        AssertJUnit.assertFalse("routing notes are about the controller: " + q, q.contains("can't play"));
+    }
+
+    /** The model turned down Jarad's return-to-hand ability 37 times in one game; repeated declines back off. */
+    @Test
+    public void repeatedDeclinesBackOff() {
+        FakeProvider provider = new FakeProvider(1); // always "hold it"
+        Game game = setUpGame("LlmAssisted", 13, provider);
+        Card gisa = addCard("Ghoulcaller Gisa", ai);
+        addCard("Grizzly Bears", ai);
+        SpellAbility ability = gisa.getSpellAbilities().stream().filter(sa -> !sa.isSpell()).findFirst().orElseThrow();
+        ability.setActivatingPlayer(ai);
+        AssertJUnit.assertTrue("instant-speed routed ability", LlmAssist.isRouted(ai, ability));
+
+        int[] asked = new int[7];
+        for (int turn = 13; turn <= 19; turn++) {
+            game.getPhaseHandler().devModeSet(PhaseType.MAIN1, ai, turn);
+            int before = provider.questions.size();
+            AssertJUnit.assertFalse(LlmAssist.confirmPlay(ai, ability));
+            asked[turn - 13] = provider.questions.size() - before;
+        }
+        // declined on turns 13 and 14, then one round (3 players) off, asked on 17, then two rounds off
+        AssertJUnit.assertEquals("[1, 1, 0, 0, 1, 0, 0]", java.util.Arrays.toString(asked));
+    }
+
     @Test
     public void mulliganRules() {
         // size, finalSize, lands, colours, ramp, early plays, off-colour, free, commander mv

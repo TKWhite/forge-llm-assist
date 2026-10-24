@@ -10,6 +10,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
+import java.util.concurrent.ConcurrentHashMap;
 
 import forge.ai.AiController;
 import forge.ai.AiPlayDecision;
@@ -115,7 +116,7 @@ public final class LlmAssist {
                 continue; // already played (or failed to) in this phase
             }
             int decided = LlmGate.cached(ai, decisionKey);
-            if (decided == LATER || (decided == AFTER_COMBAT && main1)) {
+            if (decided == LATER || (decided == AFTER_COMBAT && main1) || (instant && decided < 0 && backingOff(ai, sa))) {
                 continue;
             }
             sa.setActivatingPlayer(ai);
@@ -211,6 +212,43 @@ public final class LlmAssist {
     private static void countAsk(Player ai, SpellAbility sa, boolean useNow) {
         LlmGate.remember(ai, "asks:" + askKey(sa), Math.max(0, LlmGate.cached(ai, "asks:" + askKey(sa))) + 1);
         LlmGate.remember(ai, "last:" + askKey(sa), useNow ? USE_NOW : LATER);
+        recordDecline(ai, sa, useNow);
+    }
+
+    /**
+     * Reactive abilities the standard AI proposes at every step (Jarad's "sacrifice a Swamp and a Forest") but the
+     * model keeps turning down: after declines in {@value #DECLINE_TURNS_BEFORE_BACKOFF} different turns, the ability
+     * isn't asked about (and isn't used) for a round per further decline, up to {@value #MAX_BACKOFF_ROUNDS} rounds.
+     */
+    private static final int DECLINE_TURNS_BEFORE_BACKOFF = 2, MAX_BACKOFF_ROUNDS = 3;
+
+    /** Per game and ability: {turns declined in, last turn declined, first turn it may be asked again}. */
+    private static final Map<Game, Map<String, int[]>> declines = Collections.synchronizedMap(new WeakHashMap<>());
+
+    private static void recordDecline(Player ai, SpellAbility sa, boolean useNow) {
+        Game game = ai.getGame();
+        Map<String, int[]> perAbility = declines.computeIfAbsent(game, g -> new ConcurrentHashMap<>());
+        if (useNow) {
+            perAbility.remove(askKey(sa));
+            return;
+        }
+        int turn = game.getPhaseHandler().getTurn();
+        int[] d = perAbility.computeIfAbsent(askKey(sa), k -> new int[] {0, -1, 0});
+        if (d[1] == turn) {
+            return;
+        }
+        d[0]++;
+        d[1] = turn;
+        if (d[0] >= DECLINE_TURNS_BEFORE_BACKOFF) {
+            int rounds = Math.min(d[0] - DECLINE_TURNS_BEFORE_BACKOFF + 1, MAX_BACKOFF_ROUNDS);
+            d[2] = turn + rounds * game.getPlayers().size();
+        }
+    }
+
+    static boolean backingOff(Player ai, SpellAbility sa) {
+        Map<String, int[]> perAbility = declines.get(ai.getGame());
+        int[] d = perAbility == null ? null : perAbility.get(askKey(sa));
+        return d != null && ai.getGame().getPhaseHandler().getTurn() < d[2];
     }
 
     /**
@@ -326,12 +364,31 @@ public final class LlmAssist {
         }
         int forgeIndex = forgePick == null ? (isOptional ? labels.size() - 1 : -1) : pool.indexOf(forgePick);
         int pick = LlmGate.askRouted(ai, "routed_choice", "making a choice for " + host.getName(),
-                "You are resolving " + host.getName() + ". " + RoutedCards.guidance(ai, host) + ". What do you choose?",
+                choiceQuestion(ai, sa, host),
                 labels, List.of(host), forgeIndex, "routed_choice:" + host.getId() + ":" + sa.getId());
         if (pick < 0) {
             return forgePick;
         }
         return pick >= pool.size() ? null : pool.get(pick);
+    }
+
+    /**
+     * Quotes the effect being resolved, since the card's other abilities decide what the choice means (Eye of Doom's
+     * doom counter marks the permanent for destruction). Someone else's card gets no plan notes or tags: they are
+     * about the card's controller, and the chooser must pick for its own benefit.
+     */
+    private static String choiceQuestion(Player ai, SpellAbility sa, Card host) {
+        SpellAbility root = sa.getRootAbility();
+        String effect = root.isTrigger() && root.getTrigger() != null ? root.getTrigger().toString() : root.getDescription();
+        String text = effect == null || effect.isBlank() ? "" : " The effect: \"" + effect.trim() + "\"";
+        Player controller = host.getController();
+        if (controller == null || controller == ai) {
+            return "You are resolving your " + host.getName() + "." + text + " " + RoutedCards.guidance(ai, host)
+                    + ". What do you choose?";
+        }
+        return controller.getName() + "'s " + host.getName() + " is resolving and you must make a choice for it."
+                + text + " Read the card's full text: the chosen permanent may be harmed later. Choose what is best "
+                + "for you, not for " + controller.getName() + ". What do you choose?";
     }
 
     /**
@@ -647,12 +704,31 @@ public final class LlmAssist {
             ApiType.DamageAll, ApiType.SacrificeAll);
     private static final List<String> CONFIRM_OPTIONS = List.of("Yes, do it now", "No, wait");
 
-    /** Mass removal of permanents; ChangeZoneAll also covers graveyard hate, which isn't a wipe. */
-    private static boolean isWipe(SpellAbility sa) {
-        if (sa.getApi() == null || !WIPE_APIS.contains(sa.getApi())) {
+    /**
+     * Mass removal of permanents, including as a rider on a targeted spell (Blight Grenade: destroy target creature,
+     * then all creatures get -3/-3). ChangeZoneAll also covers graveyard hate, which isn't a wipe.
+     */
+    static boolean isWipe(SpellAbility sa) {
+        for (SpellAbility part = sa; part != null; part = part.getSubAbility()) {
+            if (isWipePart(part)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isWipePart(SpellAbility sa) {
+        ApiType api = sa.getApi();
+        if (api == ApiType.PumpAll) {
+            // shrinking every creature, not just the opponents'
+            String valid = sa.getParamOrDefault("ValidCards", "");
+            return sa.getParamOrDefault("NumDef", "").startsWith("-") && !valid.contains("OppCtrl")
+                    && !valid.contains("YouDontCtrl");
+        }
+        if (api == null || !WIPE_APIS.contains(api)) {
             return false;
         }
-        return sa.getApi() != ApiType.ChangeZoneAll || sa.getParamOrDefault("Origin", "").contains("Battlefield");
+        return api != ApiType.ChangeZoneAll || sa.getParamOrDefault("Origin", "").contains("Battlefield");
     }
 
     /**
@@ -668,6 +744,9 @@ public final class LlmAssist {
             // an instant-speed routed card the standard AI proposed: the model has the final say
             if (!LlmGate.mayAsk(ai, AiProps.LLM_HOOK_ROUTED)) {
                 return true;
+            }
+            if (RoutedCards.isInstantSpeed(sa) && backingOff(ai, sa)) {
+                return false;
             }
             if (askedEnough(ai, sa)) {
                 return lastAnswer(ai, sa) == USE_NOW;
