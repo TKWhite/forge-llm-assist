@@ -107,6 +107,47 @@ public class BasicAttackTests extends SimulationTest {
         AssertJUnit.assertEquals("the angel still goes for the kill", goader, combat.getDefenderByAttacker(angel));
     }
 
+    /**
+     * Encore tokens must each attack their own opponent; the AI's other attacks still stand. In test games the
+     * tokens were sent at the AI's chosen defender, the declaration was illegal and the engine dropped the plan.
+     */
+    @Test
+    public void encoreTokensAttackTheirOwnOpponent() {
+        Game game = initAndCreateThreePlayerGame();
+        Player weak = game.getPlayers().get(0);
+        Player attacker = game.getPlayers().get(1);
+        Player other = game.getPlayers().get(2);
+        weak.setTeam(0);
+        attacker.setTeam(1);
+        other.setTeam(2);
+        weak.setLife(3, null);
+        Card angel = addCard("Serra Angel", attacker);
+        angel.setSickness(false);
+
+        game.getPhaseHandler().devModeSet(PhaseType.MAIN1, attacker);
+        Card tyrant = addCardToZone("Broodmate Tyrant", attacker, forge.game.zone.ZoneType.Graveyard);
+        forge.game.spellability.SpellAbility encore = tyrant.getAllPossibleAbilities(attacker, true).stream()
+                .filter(sa -> sa.isKeyword(forge.game.keyword.Keyword.ENCORE)).findFirst().orElseThrow();
+        encore.setActivatingPlayer(attacker);
+        forge.game.ability.AbilityUtils.resolve(encore);
+        playUntilStackClear(game);
+        AssertJUnit.assertEquals("a token per opponent", 2, game.getCardsIn(forge.game.zone.ZoneType.Battlefield).stream()
+                .filter(c -> c.isToken() && c.getName().equals("Broodmate Tyrant")).count());
+
+        playUntilPhase(game, PhaseType.COMBAT_DECLARE_BLOCKERS);
+
+        Combat combat = game.getCombat();
+        AssertJUnit.assertNotNull(combat);
+        java.util.Set<Object> tokenDefenders = new java.util.HashSet<>();
+        for (Card c : combat.getAttackers()) {
+            if (c.isToken() && c.getName().equals("Broodmate Tyrant")) {
+                tokenDefenders.add(combat.getDefenderByAttacker(c));
+            }
+        }
+        AssertJUnit.assertEquals("one encore token at each opponent", java.util.Set.of(weak, other), tokenDefenders);
+        AssertJUnit.assertEquals("the angel still goes for the kill", weak, combat.getDefenderByAttacker(angel));
+    }
+
     @Test
     public void assaultWhenAheadIncludesTrade() {
         Game game = initAndCreateGame();

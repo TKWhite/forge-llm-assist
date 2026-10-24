@@ -924,18 +924,10 @@ public class AiAttackController {
                 final GameEntity finalDefender = defender;
                 final boolean canAttackDefender = this.attackers.contains(attacker);
                 tasks.add(() -> {
+                    // attack requirements come first: an encore token must attack "that opponent", a goaded creature
+                    // someone other than the goader; sending it at the chosen defender instead is an illegal attack
                     GameEntity mustAttackDef = null;
-                    // one that can't attack the chosen defender goes by its requirements alone
-                    if (canAttackDefender && attacker.getSVar("MustAttack").equals("True")) {
-                        mustAttackDef = finalDefender;
-                    } else if (canAttackDefender && attacker.hasSVar("EndOfTurnLeavePlay")
-                            && isEffectiveAttacker(ai, attacker, combat, finalDefender)) {
-                        mustAttackDef = finalDefender;
-                    } else if (canAttackDefender && seasonOfTheWitch) {
-                        //TODO: if there are other ways to tap this creature (like mana creature), then don't need to attack
-                        mustAttackDef = finalDefender;
-                    } else {
-                        if (combat.getAttackConstraints().getRequirements().get(attacker) == null) return 0;
+                    if (combat.getAttackConstraints().getRequirements().get(attacker) != null) {
                         // check defenders in order of maximum requirements
                         List<Pair<GameEntity, Integer>> reqs = combat.getAttackConstraints().getRequirements().get(attacker).getSortedRequirements();
                         final GameEntity def = finalDefender;
@@ -969,6 +961,19 @@ public class AiAttackController {
                                 mustAttackDef = mustAttackDefMaybe;
                                 break;
                             }
+                        }
+                    }
+                    // otherwise attackers that may as well attack go at the chosen defender (one that can't attack it
+                    // only goes where a requirement sends it)
+                    if (mustAttackDef == null && canAttackDefender) {
+                        if (attacker.getSVar("MustAttack").equals("True")) {
+                            mustAttackDef = finalDefender;
+                        } else if (attacker.hasSVar("EndOfTurnLeavePlay")
+                                && isEffectiveAttacker(ai, attacker, combat, finalDefender)) {
+                            mustAttackDef = finalDefender;
+                        } else if (seasonOfTheWitch) {
+                            //TODO: if there are other ways to tap this creature (like mana creature), then don't need to attack
+                            mustAttackDef = finalDefender;
                         }
                     }
                     if (mustAttackDef != null) {
