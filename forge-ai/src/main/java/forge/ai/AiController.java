@@ -1593,10 +1593,16 @@ public class AiController {
         }
 
         // the assist may say hold this one (a board wipe, a payoff); then look for something else to do,
-        // and give the replacement pick the same check
+        // and give the replacement pick the same check. Holding a spell drops every way of casting that card;
+        // holding an activated ability drops only that ability, so e.g. a planeswalker's other abilities stay
         for (int i = 0; chosenSa != null && i < 5 && !LlmAssist.confirmPlay(player, chosenSa); i++) {
-            final Card held = chosenSa.getHostCard();
-            saList.removeIf(sa -> sa.getHostCard() == held);
+            final SpellAbility heldSa = chosenSa;
+            final Card held = heldSa.getHostCard();
+            if (heldSa.isSpell()) {
+                saList.removeIf(sa -> sa.isSpell() && sa.getHostCard() == held);
+            } else {
+                saList.removeIf(sa -> sa == heldSa);
+            }
             chosenSa = chooseSpellAbilityToPlayFromList(saList, true);
         }
         if (chosenSa != null) {

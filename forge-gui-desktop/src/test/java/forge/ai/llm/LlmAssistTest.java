@@ -19,6 +19,7 @@ import forge.model.FModel;
 import forge.game.Game;
 import forge.game.ability.ApiType;
 import forge.game.card.Card;
+import forge.game.card.CounterEnumType;
 import forge.game.phase.PhaseType;
 import forge.game.player.Player;
 import forge.game.spellability.SpellAbility;
@@ -42,6 +43,8 @@ public class LlmAssistTest extends AITest {
         int answer;
         double confidence = 0.9;
         double[] probabilities;
+        /** when set, picks the answer from the question instead of {@link #answer} */
+        java.util.function.ToIntFunction<String> chooser;
 
         FakeProvider(int answer) {
             this.answer = answer;
@@ -59,7 +62,8 @@ public class LlmAssistTest extends AITest {
             if (answer < 0) {
                 throw new LlmException("simulated timeout");
             }
-            return new LlmAnswer(Math.min(answer, options.size() - 1), confidence, "test", 100, 5, probabilities);
+            int pick = chooser == null ? answer : chooser.applyAsInt(question);
+            return new LlmAnswer(Math.min(pick, options.size() - 1), confidence, "test", 100, 5, probabilities);
         }
     }
 
@@ -274,6 +278,55 @@ public class LlmAssistTest extends AITest {
         }
         AssertJUnit.assertTrue("until-end-of-turn copy ability", LlmAssist.isRouted(ai, copy));
         AssertJUnit.assertFalse("plain +1 stays with the standard AI", LlmAssist.isRouted(ai, counters));
+    }
+
+    /**
+     * When the model holds one activated ability, the card's other abilities stay available. In a test match the
+     * game plan flagged Freyalise; the model held her -2 and the hold dropped all her abilities, so her +2 was
+     * never used in five casts.
+     */
+    @Test
+    public void holdingOneAbilityKeepsTheOthers() throws Exception {
+        File dir = java.nio.file.Files.createTempDirectory("llm-plans").toFile();
+        System.setProperty("forge.llm.plans", dir.getAbsolutePath());
+        try {
+            FakeProvider provider = new FakeProvider(0);
+            provider.chooser = q -> q.contains("(-2:") ? 1 : 0; // hold the -2, use anything else
+            Game game = setUpGame("DSeekPlan+JevAI", 13, provider);
+            Deck deck = ai.getRegisteredPlayer().getDeck();
+            deck.getOrCreate(DeckSection.Main).add(FModel.getMagicDb().getCommonCards().getCard("Freyalise, Llanowar's Fury"));
+            java.nio.file.Files.writeString(new File(dir, "deck-" + GamePlanner.hash(deck) + ".json").toPath(),
+                    "{\"archetype\":\"Elves\",\"summary\":\"Go wide.\",\"contextCards\":[{\"card\":\"Freyalise, Llanowar's Fury\","
+                            + "\"risk\":\"modes\",\"guidance\":\"Use +2 unless a must-kill artifact justifies -2.\"}]}");
+            AssertJUnit.assertNotNull(GamePlanner.await(ai));
+
+            Card freyalise = addCard("Freyalise, Llanowar's Fury", ai);
+            freyalise.setCounters(CounterEnumType.LOYALTY, 3);
+            addCard("Sol Ring", opponentA);
+
+            playUntilPhase(game, PhaseType.END_OF_TURN);
+
+            AssertJUnit.assertTrue("the -2 went to the model: " + provider.questions,
+                    provider.questions.stream().anyMatch(q -> q.contains("(-2:")));
+            AssertJUnit.assertEquals("the +2 was used instead", 5, freyalise.getCounters(CounterEnumType.LOYALTY));
+        } finally {
+            System.clearProperty("forge.llm.plans");
+        }
+    }
+
+    /** The model picks which free permanent Genesis Hydra puts onto the battlefield, not whether to take one. */
+    @Test
+    public void noChooseNothingUnlessTheChoiceIsTheJudgmentCall() {
+        setUpGame("LlmAssisted", 13, new FakeProvider(99)); // always the last option
+        List<Card> options = List.of(addCardToZone("Perennial Behemoth", ai, ZoneType.Library),
+                addCardToZone("Sol Ring", ai, ZoneType.Library));
+
+        SpellAbility hydra = addCardToZone("Genesis Hydra", ai, ZoneType.Hand).getFirstSpellAbility();
+        AssertJUnit.assertNotNull(LlmAssist.routedChoice(ai, hydra, options, options.get(0), true));
+
+        // Cursed Mirror's copy is optional by design: there "nothing" stays on offer
+        SpellAbility mirror = addCard("Cursed Mirror", ai).getFirstSpellAbility();
+        AssertJUnit.assertNull(LlmAssist.routedChoice(ai, mirror, options, options.get(0), true));
     }
 
     @Test

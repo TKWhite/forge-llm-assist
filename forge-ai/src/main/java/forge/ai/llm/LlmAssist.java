@@ -131,9 +131,9 @@ public final class LlmAssist {
             }
 
             boolean go = decided == AFTER_COMBAT || decided == USE_NOW;
-            if (decided < 0 && askedEnough(ai, host)) {
+            if (decided < 0 && askedEnough(ai, sa)) {
                 // reactive cards come up at every opportunity: reuse this turn's last answer
-                go = LlmGate.cached(ai, "last:" + host.getId()) == USE_NOW;
+                go = lastAnswer(ai, sa) == USE_NOW;
                 decided = go ? USE_NOW : LATER;
             }
             if (decided < 0) {
@@ -150,7 +150,7 @@ public final class LlmAssist {
                 }
                 int code = main1 ? pick : (pick == 0 ? USE_NOW : LATER);
                 LlmGate.remember(ai, decisionKey, code);
-                countAsk(ai, host, code == USE_NOW);
+                countAsk(ai, sa, code == USE_NOW);
                 if (code == LATER) {
                     holdCounts.computeIfAbsent(game, g -> new HashMap<>()).merge(host.getId(), 1, Integer::sum);
                 }
@@ -190,16 +190,27 @@ public final class LlmAssist {
         return s.toString();
     }
 
-    /** Reactive routed cards come up at every opportunity; questions per card per turn are capped at this. */
-    private static final int MAX_ASKS_PER_CARD_TURN = 2;
+    /**
+     * Reactive routed cards come up at every opportunity; questions per ability per turn are capped at this. Counted
+     * per ability, not per card: a planeswalker's held -2 must not answer for its +2.
+     */
+    private static final int MAX_ASKS_PER_ABILITY_TURN = 2;
 
-    private static boolean askedEnough(Player ai, Card host) {
-        return LlmGate.cached(ai, "asks:" + host.getId()) >= MAX_ASKS_PER_CARD_TURN;
+    private static String askKey(SpellAbility sa) {
+        return sa.getHostCard().getId() + ":" + sa.getId();
     }
 
-    private static void countAsk(Player ai, Card host, boolean useNow) {
-        LlmGate.remember(ai, "asks:" + host.getId(), Math.max(0, LlmGate.cached(ai, "asks:" + host.getId())) + 1);
-        LlmGate.remember(ai, "last:" + host.getId(), useNow ? USE_NOW : LATER);
+    private static boolean askedEnough(Player ai, SpellAbility sa) {
+        return LlmGate.cached(ai, "asks:" + askKey(sa)) >= MAX_ASKS_PER_ABILITY_TURN;
+    }
+
+    private static int lastAnswer(Player ai, SpellAbility sa) {
+        return LlmGate.cached(ai, "last:" + askKey(sa));
+    }
+
+    private static void countAsk(Player ai, SpellAbility sa, boolean useNow) {
+        LlmGate.remember(ai, "asks:" + askKey(sa), Math.max(0, LlmGate.cached(ai, "asks:" + askKey(sa))) + 1);
+        LlmGate.remember(ai, "last:" + askKey(sa), useNow ? USE_NOW : LATER);
     }
 
     /**
@@ -290,6 +301,10 @@ public final class LlmAssist {
                 || !LlmGate.mayAsk(ai, AiProps.LLM_HOOK_ROUTED)) {
             return forgePick;
         }
+        Card host = sa.getHostCard();
+        // "choose nothing" is only the model's call when the card is routed for an optional choice, or the standard
+        // AI itself chose nothing; otherwise the model picks which, not whether (e.g. Genesis Hydra's free permanent)
+        isOptional &= forgePick == null || RoutedCards.staticTags(host).contains(RoutedCards.Tag.OPTIONAL_CHOICE);
         List<T> pool = new ArrayList<>();
         options.forEach(pool::add);
         if (pool.isEmpty() || (pool.size() == 1 && !isOptional)) {
@@ -309,7 +324,6 @@ public final class LlmAssist {
         if (isOptional) {
             labels.add("None: choose nothing");
         }
-        Card host = sa.getHostCard();
         int forgeIndex = forgePick == null ? (isOptional ? labels.size() - 1 : -1) : pool.indexOf(forgePick);
         int pick = LlmGate.askRouted(ai, "routed_choice", "making a choice for " + host.getName(),
                 "You are resolving " + host.getName() + ". " + RoutedCards.guidance(ai, host) + ". What do you choose?",
@@ -655,8 +669,8 @@ public final class LlmAssist {
             if (!LlmGate.mayAsk(ai, AiProps.LLM_HOOK_ROUTED)) {
                 return true;
             }
-            if (askedEnough(ai, host)) {
-                return LlmGate.cached(ai, "last:" + host.getId()) == USE_NOW;
+            if (askedEnough(ai, sa)) {
+                return lastAnswer(ai, sa) == USE_NOW;
             }
             Game game = ai.getGame();
             SpellAbility top = game.getStack().isEmpty() ? null : game.getStack().peekAbility();
@@ -670,7 +684,7 @@ public final class LlmAssist {
                     // instant-speed cards at every step, so a per-step key would ask over and over)
                     "routed_now:" + host.getId() + ":" + sa.getId() + ":" + (top == null ? 0 : top.getId()));
             if (pick >= 0) {
-                countAsk(ai, host, pick == 0);
+                countAsk(ai, sa, pick == 0);
             }
             return pick != 1;
         }
