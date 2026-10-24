@@ -418,6 +418,60 @@ public class LlmAssistTest extends AITest {
                 .anyMatch(q -> q.contains("activate Chainer") && q.contains("end step, not your turn")));
     }
 
+    /** An instant X spell is offered at an opponent's end step; the standard AI left one in hand for 25 turns. */
+    @Test
+    public void instantXSpellIsOfferedAtAnOpponentsEndStep() {
+        FakeProvider provider = new FakeProvider(0); // use it now
+        Game game = setUpGame("LlmAssisted", 13, provider);
+        addCardToZone("White Sun's Zenith", ai, ZoneType.Hand);
+        for (int i = 0; i < 5; i++) {
+            addCard("Plains", ai);
+        }
+        game.getPhaseHandler().devModeSet(PhaseType.MAIN2, opponentA, 13);
+
+        playUntilPhase(game, PhaseType.CLEANUP);
+
+        AssertJUnit.assertTrue("offered: " + provider.questions, provider.questions.stream()
+                .anyMatch(q -> q.contains("cast White Sun's Zenith with X=2") && q.contains("end step")));
+        AssertJUnit.assertEquals(2, countCardsWithName(game, "Cat Token", ZoneType.Battlefield));
+    }
+
+    /**
+     * One "use it" covers one activation, and equipment never re-equips the creature it's on. In a test match
+     * Skullclamp was re-equipped to the same creature after combat on the strength of the precombat answer.
+     */
+    @Test
+    public void abilityApprovalCoversOneActivation() throws Exception {
+        File dir = java.nio.file.Files.createTempDirectory("llm-plans").toFile();
+        System.setProperty("forge.llm.plans", dir.getAbsolutePath());
+        try {
+            FakeProvider provider = new FakeProvider(0); // always yes
+            Game game = setUpGame("DSeekPlan+JevAI", 13, provider);
+            Deck deck = ai.getRegisteredPlayer().getDeck();
+            deck.getOrCreate(DeckSection.Main).add(FModel.getMagicDb().getCommonCards().getCard("Skullclamp"));
+            java.nio.file.Files.writeString(new File(dir, "deck-" + GamePlanner.hash(deck) + ".json").toPath(),
+                    "{\"archetype\":\"Test\",\"summary\":\"Test.\",\"contextCards\":["
+                            + "{\"card\":\"Skullclamp\",\"risk\":\"dual-use\",\"guidance\":\"Equip x/1s.\"}]}");
+            AssertJUnit.assertNotNull(GamePlanner.await(ai));
+
+            Card angel = addCard("Serra Angel", ai);
+            Card clamp = addCard("Skullclamp", ai);
+            clamp.attachToEntity(angel, null);
+            addCard("Plains", ai);
+            addCard("Plains", ai);
+
+            playUntilPhase(game, PhaseType.END_OF_TURN);
+
+            long asked = provider.questions.stream().filter(q -> q.contains("activate Skullclamp")).count();
+            long equips = game.getGameLog().getLogEntries(null).stream()
+                    .filter(e -> e.message().contains("activated Skullclamp")).count();
+            AssertJUnit.assertEquals("no-op re-equip on the only creature: " + provider.questions, 0, equips);
+            AssertJUnit.assertEquals(0, asked);
+        } finally {
+            System.clearProperty("forge.llm.plans");
+        }
+    }
+
     /** The model picks which free permanent Genesis Hydra puts onto the battlefield, not whether to take one. */
     @Test
     public void noChooseNothingUnlessTheChoiceIsTheJudgmentCall() {

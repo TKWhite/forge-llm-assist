@@ -55,7 +55,7 @@ public final class LlmAssist {
     private static final List<String> MAIN1_OPTIONS = List.of(
             "Use it now, before combat", "Use it after combat this turn", "Hold it for a later turn");
     private static final List<String> NOW_OPTIONS = List.of("Use it now", "Hold it for a later turn");
-    private static final int USE_NOW = 0, AFTER_COMBAT = 1, LATER = 2;
+    private static final int USE_NOW = 0, AFTER_COMBAT = 1, LATER = 2, ASK_AGAIN = 3;
 
     public static boolean isRouted(Player ai, SpellAbility sa) {
         return RoutedCards.isRouted(ai, sa);
@@ -69,7 +69,15 @@ public final class LlmAssist {
      */
     public static boolean isProactiveRouted(Player ai, SpellAbility sa) {
         return RoutedCards.isRouted(ai, sa)
-                && (!RoutedCards.isInstantSpeed(sa) || RoutedCards.isUnsupported(sa.getHostCard()));
+                && (!RoutedCards.isInstantSpeed(sa) || RoutedCards.isUnsupported(sa.getHostCard()) || isXSpell(sa));
+    }
+
+    /**
+     * Instant X spells (White Sun's Zenith) are offered at an opponent's end step rather than left to the standard
+     * AI, which rarely proposes them: in a test match one sat in hand for 25 turns.
+     */
+    private static boolean isXSpell(SpellAbility sa) {
+        return sa.isSpell() && RoutedCards.staticTags(sa.getHostCard()).contains(RoutedCards.Tag.X_COST);
     }
 
     /**
@@ -143,6 +151,9 @@ public final class LlmAssist {
                 continue; // already played (or failed to) in this phase
             }
             int decided = LlmGate.cached(ai, decisionKey);
+            if (decided == ASK_AGAIN) {
+                decided = -1;
+            }
             if (decided == LATER || (decided == AFTER_COMBAT && main1) || (instant && decided < 0 && backingOff(ai, sa))) {
                 continue;
             }
@@ -156,6 +167,10 @@ public final class LlmAssist {
                 if (xValue <= 0) {
                     continue;
                 }
+            }
+
+            if (!hasUsefulTarget(ai, sa)) {
+                continue;
             }
 
             boolean go = decided == AFTER_COMBAT || decided == USE_NOW;
@@ -189,6 +204,10 @@ public final class LlmAssist {
                 continue;
             }
             LlmGate.remember(ai, triedKey, 1);
+            if (!sa.isSpell()) {
+                // one "use it" covers one activation: an equip approved before combat isn't repeated after it
+                LlmGate.remember(ai, decisionKey, ASK_AGAIN);
+            }
             if (prepareRoutedTargets(aic, ai, sa)) {
                 return sa;
             }
@@ -343,6 +362,25 @@ public final class LlmAssist {
         return d != null && ai.getGame().getPhaseHandler().getTurn() < d[2];
     }
 
+    /** False for a targeted ability with nothing worth targeting, so the model isn't asked about it. */
+    private static boolean hasUsefulTarget(Player ai, SpellAbility sa) {
+        if (!sa.usesTargeting()) {
+            return true;
+        }
+        GameEntity attachedTo = sa.getApi() == ApiType.Attach ? sa.getHostCard().getEntityAttachedTo() : null;
+        for (Player p : ai.getGame().getPlayers()) {
+            if (sa.canTarget(p)) {
+                return true;
+            }
+        }
+        for (Card c : ai.getGame().getCardsIn(sa.getTargetRestrictions().getZone())) {
+            if (c != attachedTo && sa.canTarget(c)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /**
      * Targets for a routed ability. A single target is the model's pick from every legal target, with the
      * standard AI's pick as a hint; multi-target and targeted sub-abilities use the standard AI's targeting.
@@ -374,10 +412,15 @@ public final class LlmAssist {
                 targets.add(p);
             }
         }
+        // re-attaching equipment or an aura to what it's already on does nothing
+        GameEntity attachedTo = sa.getApi() == ApiType.Attach ? sa.getHostCard().getEntityAttachedTo() : null;
         for (Card c : ai.getGame().getCardsIn(ZoneType.Battlefield)) {
-            if (sa.canTarget(c)) {
+            if (c != attachedTo && sa.canTarget(c)) {
                 targets.add(c);
             }
+        }
+        if (forgePick != null && forgePick == attachedTo) {
+            forgePick = null;
         }
         if (targets.isEmpty()) {
             return false;
@@ -931,9 +974,9 @@ public final class LlmAssist {
             return pick != 1;
         }
         if (isWipe(sa) && LlmGate.mayAsk(ai, AiProps.LLM_HOOK_WIPE)) {
-            int pick = LlmGate.ask(ai, AiProps.LLM_HOOK_WIPE, "wipe", "deciding whether to cast " + host.getName() + " now",
-                    "The standard AI wants to cast the mass-removal spell " + host.getName()
-                            + " now. Considering everyone's board (including yours), should you cast it now or wait?",
+            int pick = LlmGate.ask(ai, AiProps.LLM_HOOK_WIPE, "wipe", "deciding whether to " + playLabel(sa) + " now",
+                    "The standard AI wants to " + playLabel(sa) + " now, which removes creatures or permanents en masse."
+                            + " Considering everyone's board (including yours), should you do it now or wait?",
                     CONFIRM_OPTIONS, List.of(host), 0, "wipe:" + host.getId());
             return pick != 1;
         }
