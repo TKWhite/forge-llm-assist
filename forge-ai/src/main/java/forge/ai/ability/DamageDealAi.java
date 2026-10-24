@@ -279,7 +279,8 @@ public class DamageDealAi extends DamageAiBase {
         if ((damage.equals("X") && sa.getSVar(damage).equals("Count$xPaid")) ||
                 sourceName.equals("Crater's Claws")) {
             // If I can kill my target by paying less mana, do it
-            if (sa.usesTargeting() && !sa.getTargets().isTargetingAnyPlayer() && !sa.isDividedAsYouChoose()) {
+            if (sa.usesTargeting() && !sa.getTargets().isTargetingAnyPlayer() && !sa.isDividedAsYouChoose()
+                    && !xUsedBeyondDamage(sa)) {
                 int actualPay = dmg;
                 final boolean noPrevention = sa.hasParam("NoPrevention");
                 for (final Card c : sa.getTargets().getTargetCards()) {
@@ -932,7 +933,8 @@ public class DamageDealAi extends DamageAiBase {
                 return new AiAbilityDecision(0, AiPlayDecision.TargetingFailed);
             }
 
-            if (damage.equals("X") && sa.getSVar(damage).equals("Count$xPaid") && !sa.isDividedAsYouChoose()) {
+            if (damage.equals("X") && sa.getSVar(damage).equals("Count$xPaid") && !sa.isDividedAsYouChoose()
+                    && !xUsedBeyondDamage(sa)) {
                 // If I can kill my target by paying less mana, do it
                 int actualPay = 0;
                 final boolean noPrevention = sa.hasParam("NoPrevention");
@@ -1201,5 +1203,18 @@ public class DamageDealAi extends DamageAiBase {
         }
 
         return null;
+    }
+
+    /**
+     * True when X also scales another part of the spell (Worldsoul's Rage puts up to X lands onto the battlefield),
+     * so paying only enough X to kill the target would throw the rest away.
+     */
+    private static boolean xUsedBeyondDamage(SpellAbility sa) {
+        for (SpellAbility sub = sa.getSubAbility(); sub != null; sub = sub.getSubAbility()) {
+            if (sub.getMapParams().containsValue("X")) {
+                return true;
+            }
+        }
+        return false;
     }
 }

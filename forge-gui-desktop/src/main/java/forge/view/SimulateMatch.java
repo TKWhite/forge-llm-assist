@@ -7,6 +7,8 @@ import java.util.concurrent.TimeoutException;
 
 import org.apache.commons.lang3.time.StopWatch;
 
+import com.google.common.eventbus.Subscribe;
+
 import forge.LobbyPlayer;
 import forge.ai.AiProfileUtil;
 import forge.deck.Deck;
@@ -19,6 +21,11 @@ import forge.game.GameLogEntryType;
 import forge.game.GameRules;
 import forge.game.GameType;
 import forge.game.Match;
+import forge.game.card.Card;
+import forge.game.event.GameEventTurnPhase;
+import forge.game.phase.PhaseType;
+import forge.game.player.Player;
+import forge.game.zone.ZoneType;
 import forge.game.player.RegisteredPlayer;
 import forge.gamemodes.tournament.system.AbstractTournament;
 import forge.gamemodes.tournament.system.TournamentBracket;
@@ -87,6 +94,7 @@ public class SimulateMatch {
         }
 
         boolean outputGamelog = !params.containsKey("q");
+        revealHands = params.containsKey("r");
 
         Long seed = null;
         if (params.containsKey("s")) {
@@ -190,8 +198,31 @@ public class SimulateMatch {
         System.out.flush();
     }
 
+    private static boolean revealHands;
+
+    /**
+     * Logs each player's hand at the start of each first main phase (after the draw); hands are hidden
+     * information, so the game log never shows them.
+     */
+    private record HandLogger(Game game) {
+        @Subscribe
+        public void phase(GameEventTurnPhase event) {
+            if (event.phase() != PhaseType.MAIN1) {
+                return;
+            }
+            for (Player p : game.getPlayers()) {
+                List<String> names = new ArrayList<>();
+                for (Card c : p.getCardsIn(ZoneType.Hand)) {
+                    names.add(c.getName());
+                }
+                game.getGameLog().add(GameLogEntryType.INFORMATION,
+                        p.getName() + "'s hand (" + names.size() + "): " + String.join(", ", names));
+            }
+        }
+    }
+
     private static void argumentHelp() {
-        System.out.println("Syntax: forge.exe sim -d <deck1[.dck]> ... <deckX[.dck]> -D [D] -n [N] -m [M] -t [T] -p [P] -f [F] -s [S] -a [A] -q");
+        System.out.println("Syntax: forge.exe sim -d <deck1[.dck]> ... <deckX[.dck]> -D [D] -n [N] -m [M] -t [T] -p [P] -f [F] -s [S] -a [A] -q -r");
         System.out.println("\tsim - stands for simulation mode");
         System.out.println("\tdeck1 (or deck2,...,X) - constructed deck name or filename (has to be quoted when contains multiple words)");
         System.out.println("\tdeck is treated as file if it ends with a dot followed by three numbers or letters");
@@ -213,6 +244,9 @@ public class SimulateMatch {
 
         final Game g1 = mc.createGame();
         g1.setNoGUIUser();
+        if (revealHands) {
+            g1.subscribeToEvents(new HandLogger(g1));
+        }
         // will run match in the same thread
         try {
             TimeLimitedCodeBlock.runWithTimeout(() -> {

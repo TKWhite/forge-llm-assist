@@ -2,6 +2,7 @@ package forge.ai.ability;
 
 import forge.ai.AITest;
 import forge.game.Game;
+import forge.game.card.Card;
 import forge.game.player.Player;
 
 import org.testng.AssertJUnit;
@@ -50,6 +51,30 @@ public class BecomeMonarchAiTest extends AITest {
         playUntilStackClear(game);
 
         AssertJUnit.assertEquals("AI should have taken the crown", ai, game.getMonarch());
+    }
+
+    /**
+     * Denethor, Stone Seer targets the player to crown. The AI used to activate it without choosing that
+     * target, so it paid the mana and sacrificed Denethor, then the ability failed to go on the stack.
+     */
+    @Test
+    public void targetsItselfWithDenethor() {
+        Game game = initAndCreateGame();
+        Player ai = game.getPlayers().get(1);
+        Player opponent = game.getPlayers().get(0);
+
+        Card denethor = addCard("Denethor, Stone Seer", ai);
+        denethor.setSickness(false);
+        for (int i = 0; i < 4; i++) {
+            addCard("Mountain", ai);
+        }
+        game.getAction().becomeMonarch(opponent, null);
+
+        playUntilStackClear(game);
+
+        AssertJUnit.assertEquals("AI should have crowned itself", ai, game.getMonarch());
+        AssertJUnit.assertEquals("Denethor should have been sacrificed", 0,
+                countCardsWithName(game, "Denethor, Stone Seer"));
     }
 
     /** With no monarch at all the ability is still worth activating. */

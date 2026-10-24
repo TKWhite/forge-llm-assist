@@ -294,6 +294,27 @@ public class CharmAi extends SpellAbilityAi {
         if (chosen.size() == min - 1 && goodChoice != null) {
             chosen.add(0, goodChoice);  // hack to make Dromoka's Command fight targets work
         }
+        if (chosen.size() < min && sa.hasParam("CanRepeatModes")) {
+            // Confluences: repeat a safe mode rather than give up (Fiery Confluence's 2 damage to each opponent
+            // three times). Mass effects such as 1 damage to each creature aren't repeated, they also hit our side.
+            List<AbilitySub> repeatable = Lists.newArrayList();
+            if (goodChoice != null) {
+                repeatable.add(goodChoice);
+            }
+            for (AbilitySub sub : chosen) {
+                if (!sub.usesTargeting() && sub.getApi() != null && !sub.getApi().name().endsWith("All")) {
+                    repeatable.add(sub);
+                }
+            }
+            if (!repeatable.isEmpty()) {
+                if (goodChoice != null && !chosen.contains(goodChoice)) {
+                    chosen.add(0, goodChoice);
+                }
+                for (int i = 0; chosen.size() < min; i++) {
+                    chosen.add(repeatable.get(i % repeatable.size()));
+                }
+            }
+        }
         if (chosen.size() != min) {
             chosen.clear();
         }
