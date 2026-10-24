@@ -368,6 +368,56 @@ public class LlmAssistTest extends AITest {
         }
     }
 
+    /**
+     * Routed cards are offered biggest first. In a test match a cheap Dinosaur was offered (and approved) before the
+     * commander, spending the mana, so the commander wasn't even offered for two turns.
+     */
+    @Test
+    public void routedCardsAreOfferedBiggestFirst() throws Exception {
+        File dir = java.nio.file.Files.createTempDirectory("llm-plans").toFile();
+        System.setProperty("forge.llm.plans", dir.getAbsolutePath());
+        try {
+            FakeProvider provider = new FakeProvider(0); // use it now
+            Game game = setUpGame("DSeekPlan+JevAI", 13, provider);
+            Deck deck = ai.getRegisteredPlayer().getDeck();
+            deck.getOrCreate(DeckSection.Main).add(FModel.getMagicDb().getCommonCards().getCard("Grizzly Bears"));
+            deck.getOrCreate(DeckSection.Main).add(FModel.getMagicDb().getCommonCards().getCard("Air Elemental"));
+            java.nio.file.Files.writeString(new File(dir, "deck-" + GamePlanner.hash(deck) + ".json").toPath(),
+                    "{\"archetype\":\"Test\",\"summary\":\"Test.\",\"contextCards\":["
+                            + "{\"card\":\"Grizzly Bears\",\"risk\":\"timing\",\"guidance\":\"Any time.\"},"
+                            + "{\"card\":\"Air Elemental\",\"risk\":\"timing\",\"guidance\":\"Any time.\"}]}");
+            AssertJUnit.assertNotNull(GamePlanner.await(ai));
+
+            addCardToZone("Grizzly Bears", ai, ZoneType.Hand);
+            addCardToZone("Air Elemental", ai, ZoneType.Hand);
+            for (String land : List.of("Forest", "Forest", "Forest", "Island", "Island")) {
+                addCard(land, ai);
+            }
+
+            playUntilPhase(game, PhaseType.END_OF_TURN);
+
+            AssertJUnit.assertTrue("first offer: " + provider.questions, provider.questions.get(0).contains("Air Elemental"));
+            AssertJUnit.assertEquals(1, countCardsWithName(game, "Air Elemental", ZoneType.Battlefield));
+        } finally {
+            System.clearProperty("forge.llm.plans");
+        }
+    }
+
+    /** At an opponent's end step the question says so; "this turn" effects are worthless there. */
+    @Test
+    public void offerOnAnOpponentsTurnSaysSo() {
+        FakeProvider provider = new FakeProvider(1); // hold it
+        Game game = setUpGame("LlmAssisted", 13, provider);
+        addCard("Chainer, Nightmare Adept", ai);
+        addCardToZone("Grizzly Bears", ai, ZoneType.Hand);
+        game.getPhaseHandler().devModeSet(PhaseType.MAIN2, opponentA, 13);
+
+        playUntilPhase(game, PhaseType.CLEANUP);
+
+        AssertJUnit.assertTrue("Chainer offered at the end step: " + provider.questions, provider.questions.stream()
+                .anyMatch(q -> q.contains("activate Chainer") && q.contains("end step, not your turn")));
+    }
+
     /** The model picks which free permanent Genesis Hydra puts onto the battlefield, not whether to take one. */
     @Test
     public void noChooseNothingUnlessTheChoiceIsTheJudgmentCall() {

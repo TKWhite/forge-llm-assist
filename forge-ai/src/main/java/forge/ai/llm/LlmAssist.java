@@ -105,8 +105,27 @@ public final class LlmAssist {
             }
         }
 
+        // biggest plays first, so a cheap card the model approves doesn't spend the mana before the commander or a
+        // payoff is even offered
+        List<SpellAbility> ordered = new ArrayList<>(routed);
+        ordered.sort(Comparator.comparingInt((SpellAbility sa) -> -sa.getHostCard().getCMC())
+                .thenComparing(sa -> sa.getHostCard().isCommander() ? 0 : 1));
+        // the state says whose turn it is, but the question must too: the model approved Chainer's "you may cast a
+        // creature from your graveyard this turn" at opponents' end steps, discarding a card for nothing each time
+        String notYourTurn;
+        if (ownMain) {
+            notYourTurn = "";
+        } else if (oppEndStep) {
+            notYourTurn = " It is now " + ph.getPlayerTurn().getName() + "'s end step, not your turn: anything that"
+                    + " lasts \"this turn\" ends in moments, and you can't cast sorcery-speed spells.";
+        } else {
+            notYourTurn = " You would be responding to " + top.getHostCard().getName() + (ph.isPlayerTurn(ai) ? "."
+                    : ", during " + ph.getPlayerTurn().getName() + "'s turn: anything that lasts \"this turn\" ends"
+                    + " this turn, and you can't cast sorcery-speed spells.");
+        }
+
         Set<String> seen = new HashSet<>();
-        for (SpellAbility sa : routed) {
+        for (SpellAbility sa : ordered) {
             Card host = sa.getHostCard();
             String id = host.getId() + ":" + sa.getId();
             if (sa.isPwAbility() || !seen.add(id)) {
@@ -148,7 +167,8 @@ public final class LlmAssist {
             if (decided < 0) {
                 String what = playLabel(sa) + (xValue > 0 ? " with X=" + xValue : "");
                 int held = holdTurns(ai, host);
-                String question = "Should you " + what + "? This card needs judgment: " + RoutedCards.guidance(ai, host) + "."
+                String question = "Should you " + what + "?" + notYourTurn + " This card needs judgment: "
+                        + RoutedCards.guidance(ai, host) + "."
                         + (held > 0 ? " You have already held it for " + held + (held == 1 ? " turn" : " turns")
                         + "; a card that is never used does nothing." : "");
                 List<String> options = main1 ? MAIN1_OPTIONS : NOW_OPTIONS;
