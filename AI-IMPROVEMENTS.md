@@ -20,3 +20,16 @@ A fork of [Card-Forge/forge](https://github.com/Card-Forge/forge) (release 2.0.1
 - Headless games:
   - Command: `forge sim -f Commander -D <deckdir> -d a.dck b.dck c.dck d.dck -n 1 -s <seed>`.
   - `-r` logs every player's hand at each first main phase. The game log never shows hidden cards.
+
+## Sim results (stock 2.0.15 vs this branch)
+
+These came from 4-player Commander precon tables. Both builds used the same decks and seeds, 5 games per table:
+
+| Table | Stock | This branch |
+|---|---|---|
+| Goad / encore (Draconic Dissent, Blame Game, Masters of Evil, Dance of the Elements) | 10 attack plans thrown away as illegal | 0 |
+| Token swarm (Tricky Terrain, Animated Army, Mardu Surge, Blame Game) | 138 decision timeouts; one game hit the 25-minute cap | 12 timeouts; longest game 15 minutes |
+| Monarch (Riders of Rohan, Wakanda Forever, Tinker Time, Dance of the Elements) | Denethor activated 6 times, every one fizzled | 3 activations, all crowned itself |
+| Burn (World Shaper, Wade into Battle, Chaos Incarnate, Veloci-Ramp-Tor) | Fiery Confluence cast 2 times | 7 times |
+
+Across all 40 games, stock threw away 16 attack plans and this branch none. A separate 24-game random-precon run showed no change in stability. Win rates aren't compared: the samples are too small.
