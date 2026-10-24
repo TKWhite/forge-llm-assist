@@ -6,6 +6,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -24,6 +25,7 @@ import forge.game.GameLogEntryType;
 import forge.game.GameEntity;
 import forge.game.ability.ApiType;
 import forge.game.card.Card;
+import forge.game.card.CounterEnumType;
 import forge.game.phase.PhaseHandler;
 import forge.game.phase.PhaseType;
 import forge.game.player.Player;
@@ -96,12 +98,18 @@ public final class LlmAssist {
         }
         boolean main1 = ownMain && ph.is(PhaseType.MAIN1);
         String window = opponentOnStack ? "stack" + top.getId() : String.valueOf(ph.getPhase());
+        if (ownMain) {
+            SpellAbility loyalty = playLoyaltyAbility(aic, ai, routed, main1);
+            if (loyalty != null) {
+                return loyalty;
+            }
+        }
 
         Set<String> seen = new HashSet<>();
         for (SpellAbility sa : routed) {
             Card host = sa.getHostCard();
             String id = host.getId() + ":" + sa.getId();
-            if (!seen.add(id)) {
+            if (sa.isPwAbility() || !seen.add(id)) {
                 continue;
             }
             // sorcery-speed cards in own main phases; instant-speed ones (only offered here when the standard AI
@@ -163,6 +171,70 @@ public final class LlmAssist {
             LlmGate.remember(ai, triedKey, 1);
             if (prepareRoutedTargets(aic, ai, sa)) {
                 return sa;
+            }
+        }
+        return null;
+    }
+
+    private static final int LOYALTY_NONE = Integer.MAX_VALUE, LOYALTY_AFTER_COMBAT = Integer.MAX_VALUE - 1;
+
+    /**
+     * A routed planeswalker's loyalty abilities are one question per main phase ("which ability, if any?"), since
+     * only one can be used per turn: asked one by one, whichever came first would win.
+     */
+    private static SpellAbility playLoyaltyAbility(AiController aic, Player ai, List<SpellAbility> routed, boolean main1) {
+        Map<Card, List<SpellAbility>> byWalker = new LinkedHashMap<>();
+        for (SpellAbility sa : routed) {
+            if (!sa.isPwAbility()) {
+                continue;
+            }
+            sa.setActivatingPlayer(ai);
+            if (sa.canPlay() && sa.canCastTiming(ai) && ComputerUtilCost.canPayCost(sa, ai, false)) {
+                List<SpellAbility> list = byWalker.computeIfAbsent(sa.getHostCard(), c -> new ArrayList<>());
+                if (!list.contains(sa)) {
+                    list.add(sa);
+                }
+            }
+        }
+        for (Map.Entry<Card, List<SpellAbility>> e : byWalker.entrySet()) {
+            Card walker = e.getKey();
+            List<SpellAbility> abilities = e.getValue();
+            String key = "loyalty:" + walker.getId() + ":" + (main1 ? "main1" : "main2");
+            int decided = LlmGate.cached(ai, key);
+            if (decided == LOYALTY_NONE || decided == LOYALTY_AFTER_COMBAT) {
+                continue;
+            }
+            if (decided < 0) {
+                List<String> options = new ArrayList<>();
+                for (SpellAbility sa : abilities) {
+                    options.add(sa.toString().trim());
+                }
+                if (main1) {
+                    options.add("Wait until after combat");
+                }
+                options.add("None this turn");
+                String question = "Which loyalty ability of " + walker.getName() + " (loyalty "
+                        + walker.getCounters(CounterEnumType.LOYALTY) + ") should you activate? This card needs judgment: "
+                        + RoutedCards.guidance(ai, walker) + ".";
+                int pick = LlmGate.askRouted(ai, "routed", "choosing a loyalty ability of " + walker.getName(), question,
+                        options, List.of(walker), -1, key + ":q");
+                if (pick < 0) {
+                    continue;
+                }
+                decided = pick < abilities.size() ? abilities.get(pick).getId()
+                        : main1 && pick == abilities.size() ? LOYALTY_AFTER_COMBAT : LOYALTY_NONE;
+                LlmGate.remember(ai, key, decided);
+                if (decided == LOYALTY_NONE || decided == LOYALTY_AFTER_COMBAT) {
+                    continue;
+                }
+            }
+            for (SpellAbility sa : abilities) {
+                if (sa.getId() == decided) {
+                    LlmGate.remember(ai, key, LOYALTY_NONE); // one try: a failed activation isn't retried
+                    if (prepareRoutedTargets(aic, ai, sa)) {
+                        return sa;
+                    }
+                }
             }
         }
         return null;
@@ -719,6 +791,10 @@ public final class LlmAssist {
 
     private static boolean isWipePart(SpellAbility sa) {
         ApiType api = sa.getApi();
+        String which = sa.getParamOrDefault("ValidCards", "") + sa.getParamOrDefault("ChangeType", "");
+        if (which.contains("Remembered") || which.contains("Targeted") || which.contains("Imprinted")) {
+            return false; // the cards chosen earlier in the spell (Disorienting Choice), not everything
+        }
         if (api == ApiType.PumpAll) {
             // shrinking every creature, not just the opponents'
             String valid = sa.getParamOrDefault("ValidCards", "");

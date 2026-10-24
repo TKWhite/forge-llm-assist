@@ -281,17 +281,16 @@ public class LlmAssistTest extends AITest {
     }
 
     /**
-     * When the model holds one activated ability, the card's other abilities stay available. In a test match the
-     * game plan flagged Freyalise; the model held her -2 and the hold dropped all her abilities, so her +2 was
-     * never used in five casts.
+     * A flagged planeswalker's loyalty abilities are one question, and the model can pick any of them. In a test
+     * match the game plan flagged Freyalise; holding her -2 dropped all her abilities, so her +2 was never used.
      */
     @Test
-    public void holdingOneAbilityKeepsTheOthers() throws Exception {
+    public void modelPicksAmongLoyaltyAbilities() throws Exception {
         File dir = java.nio.file.Files.createTempDirectory("llm-plans").toFile();
         System.setProperty("forge.llm.plans", dir.getAbsolutePath());
         try {
             FakeProvider provider = new FakeProvider(0);
-            provider.chooser = q -> q.contains("(-2:") ? 1 : 0; // hold the -2, use anything else
+            provider.chooser = q -> q.startsWith("Which loyalty ability") ? 1 : 0; // the -2
             Game game = setUpGame("DSeekPlan+JevAI", 13, provider);
             Deck deck = ai.getRegisteredPlayer().getDeck();
             deck.getOrCreate(DeckSection.Main).add(FModel.getMagicDb().getCommonCards().getCard("Freyalise, Llanowar's Fury"));
@@ -302,16 +301,36 @@ public class LlmAssistTest extends AITest {
 
             Card freyalise = addCard("Freyalise, Llanowar's Fury", ai);
             freyalise.setCounters(CounterEnumType.LOYALTY, 3);
-            addCard("Sol Ring", opponentA);
+            Card ring = addCard("Sol Ring", opponentA);
 
             playUntilPhase(game, PhaseType.END_OF_TURN);
 
-            AssertJUnit.assertTrue("the -2 went to the model: " + provider.questions,
-                    provider.questions.stream().anyMatch(q -> q.contains("(-2:")));
-            AssertJUnit.assertEquals("the +2 was used instead", 5, freyalise.getCounters(CounterEnumType.LOYALTY));
+            AssertJUnit.assertEquals("one question for the walker: " + provider.questions, 1,
+                    provider.questions.stream().filter(q -> q.startsWith("Which loyalty ability")).count());
+            AssertJUnit.assertEquals("the -2 was used", 1, freyalise.getCounters(CounterEnumType.LOYALTY));
+            AssertJUnit.assertTrue("on the Sol Ring", ring.isInZone(ZoneType.Graveyard));
         } finally {
             System.clearProperty("forge.llm.plans");
         }
+    }
+
+    /**
+     * A planeswalker the standard AI can't play (AI:RemoveDeck:All) has its loyalty abilities offered to the model.
+     * In a test match Daretti, Scrap Savant was cast five times and never activated.
+     */
+    @Test
+    public void unsupportedPlaneswalkerAbilitiesGoToTheModel() {
+        FakeProvider provider = new FakeProvider(0); // use whatever is offered
+        Game game = setUpGame("LlmAssisted", 13, provider);
+        Card daretti = addCard("Daretti, Scrap Savant", ai);
+        daretti.setCounters(CounterEnumType.LOYALTY, 3);
+        addCardToZone("Mountain", ai, ZoneType.Hand);
+        addCardToZone("Island", ai, ZoneType.Hand);
+        playUntilPhase(game, PhaseType.END_OF_TURN);
+
+        AssertJUnit.assertTrue("Daretti's abilities went to the model: " + provider.questions,
+                provider.questions.stream().anyMatch(q -> q.contains("Daretti")));
+        AssertJUnit.assertEquals(5, daretti.getCounters(CounterEnumType.LOYALTY));
     }
 
     /** The model picks which free permanent Genesis Hydra puts onto the battlefield, not whether to take one. */
@@ -337,6 +356,8 @@ public class LlmAssistTest extends AITest {
         AssertJUnit.assertTrue(LlmAssist.isWipe(addCardToZone("Infest", ai, ZoneType.Hand).getFirstSpellAbility()));
         AssertJUnit.assertFalse("one-sided", LlmAssist.isWipe(addCardToZone("Cower in Fear", ai, ZoneType.Hand).getFirstSpellAbility()));
         AssertJUnit.assertFalse(LlmAssist.isWipe(addCardToZone("Doom Blade", ai, ZoneType.Hand).getFirstSpellAbility()));
+        AssertJUnit.assertFalse("exiles only the chosen permanents",
+                LlmAssist.isWipe(addCardToZone("Disorienting Choice", ai, ZoneType.Hand).getFirstSpellAbility()));
     }
 
     /**

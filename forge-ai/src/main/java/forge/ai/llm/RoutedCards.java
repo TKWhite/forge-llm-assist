@@ -191,13 +191,16 @@ public final class RoutedCards {
         });
     }
 
-    /** Instants, flash spells and activated abilities without a sorcery-speed restriction. */
+    /**
+     * Instants, flash spells and activated abilities without a sorcery-speed restriction. Loyalty abilities are
+     * sorcery-speed by rule, not by a restriction.
+     */
     public static boolean isInstantSpeed(SpellAbility sa) {
         Card host = sa.getHostCard();
         if (sa.isSpell()) {
             return host.isInstant() || host.hasKeyword(Keyword.FLASH);
         }
-        return !sa.getRestrictions().isSorcerySpeed();
+        return !sa.isPwAbility() && !sa.getRestrictions().isSorcerySpeed();
     }
 
     /**

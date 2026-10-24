@@ -47,6 +47,35 @@ public class BasicAttackTests extends SimulationTest {
         AssertJUnit.assertEquals("AI should attack with all 5 bears for lethal", 5, attackingCreatures);
     }
 
+    /**
+     * Lethal on any opponent beats the threat-based choice of whom to attack. In a test match a flyer with enough
+     * power to kill a player at 5 life attacked a healthier opponent instead, twice.
+     */
+    @Test
+    public void assaultsTheOpponentItCanKill() {
+        Game game = initAndCreateThreePlayerGame();
+        Player weak = game.getPlayers().get(0);
+        Player attacker = game.getPlayers().get(1);
+        Player threat = game.getPlayers().get(2);
+        weak.setTeam(0);
+        attacker.setTeam(1);
+        threat.setTeam(2);
+
+        weak.setLife(3, null);
+        // a much bigger threat, so the usual pick is the other opponent
+        for (int i = 0; i < 6; i++) {
+            addCard("Craw Wurm", threat).setSickness(false);
+        }
+        Card angel = addCard("Serra Angel", attacker);
+        angel.setSickness(false);
+
+        game.getPhaseHandler().devModeSet(PhaseType.MAIN1, attacker);
+        game.getAction().checkStateEffects(true);
+
+        Combat combat = ((PlayerControllerAi) attacker.getController()).getAi().getPredictedCombat();
+        AssertJUnit.assertEquals("the flyer goes for the kill", weak, combat.getDefenderByAttacker(angel));
+    }
+
     @Test
     public void assaultWhenAheadIncludesTrade() {
         Game game = initAndCreateGame();

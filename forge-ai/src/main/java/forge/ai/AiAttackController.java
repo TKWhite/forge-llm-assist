@@ -817,7 +817,27 @@ public class AiAttackController {
         }
 
         // TODO ideally requirements and attackMax are calculated first. so AI knows which attackers can't contribute
-        final boolean bAssault = doAssault();
+        boolean assault = doAssault();
+        if (!assault && ai.getOpponents().size() > 1) {
+            // an opponent who can be killed this combat beats the threat-based pick
+            final Player preferred = defendingOpponent;
+            for (Player opp : ai.getOpponents()) {
+                if (opp == preferred || !combat.getDefenders().contains(opp)) {
+                    continue;
+                }
+                defendingOpponent = opp;
+                refreshCombatants(opp);
+                if (doAssault()) {
+                    assault = true;
+                    break;
+                }
+            }
+            if (!assault) {
+                defendingOpponent = preferred;
+                refreshCombatants(preferred);
+            }
+        }
+        final boolean bAssault = assault;
 
         // Determine who will be attacked
         GameEntity defender = chooseDefender(combat, bAssault);
