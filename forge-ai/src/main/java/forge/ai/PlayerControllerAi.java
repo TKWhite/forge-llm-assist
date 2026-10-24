@@ -1063,7 +1063,7 @@ public class PlayerControllerAi extends PlayerController {
         if (sa.getChosenList() == null) {
             getAi().doTrigger(sa, true);
         }
-        return LlmAssist.routedModes(brains, player, sa, possible, num, sa.getChosenList());
+        return LlmAssist.routedModes(brains, player, sa, possible, min, num, allowRepeat, sa.getChosenList());
     }
 
     @Override

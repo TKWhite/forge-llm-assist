@@ -479,16 +479,30 @@ public final class LlmAssist {
         return pick < 0 ? forgeAnswer : pick == 0;
     }
 
-    /** Mode choice for routed modal cards (single-mode choices); targets for a switched mode are re-chosen. */
+    /**
+     * Mode choice for routed modal cards; targets for the model's modes are re-chosen. Spells with several modes
+     * (Fiery Confluence: three, repeats allowed) are picked one mode at a time: the standard AI often finds no set
+     * of modes for those and the spell would be cast doing nothing.
+     */
     public static List<AbilitySub> routedModes(AiController aic, Player ai, SpellAbility sa, List<AbilitySub> possible,
-                                               int num, List<AbilitySub> forgeModes) {
-        if (num != 1 || possible.size() < 2 || sa.getHostCard() == null || !RoutedCards.routesChoices(ai, sa.getHostCard())
-                || !LlmGate.mayAsk(ai, AiProps.LLM_HOOK_ROUTED)) {
+                                               int min, int num, boolean allowRepeat, List<AbilitySub> forgeModes) {
+        if (possible.size() < (num == 1 ? 2 : 1) || sa.getHostCard() == null
+                || !RoutedCards.routesChoices(ai, sa.getHostCard()) || !LlmGate.mayAsk(ai, AiProps.LLM_HOOK_ROUTED)) {
             return forgeModes;
         }
+        return num == 1 ? routedMode(aic, ai, sa, possible, forgeModes)
+                : routedModeList(aic, ai, sa, possible, min, num, allowRepeat, forgeModes);
+    }
+
+    private static String modeLabel(AbilitySub mode) {
+        return mode.getDescription() == null || mode.getDescription().isBlank() ? mode.toString() : mode.getDescription();
+    }
+
+    private static List<AbilitySub> routedMode(AiController aic, Player ai, SpellAbility sa, List<AbilitySub> possible,
+                                               List<AbilitySub> forgeModes) {
         List<String> labels = new ArrayList<>();
         for (AbilitySub mode : possible) {
-            labels.add(mode.getDescription() == null || mode.getDescription().isBlank() ? mode.toString() : mode.getDescription());
+            labels.add(modeLabel(mode));
         }
         AbilitySub forgeMode = forgeModes == null || forgeModes.isEmpty() ? null : forgeModes.get(0);
         Card host = sa.getHostCard();
@@ -499,16 +513,69 @@ public final class LlmAssist {
             return forgeModes;
         }
         AbilitySub chosen = possible.get(pick);
-        chosen.setActivatingPlayer(ai);
-        if (chosen.usesTargeting()) {
-            chosen.resetTargets();
-            if (!aic.doTrigger(chosen, true) || !chosen.isTargetNumberValid()) {
-                return forgeModes; // the model's mode has no usable target
-            }
+        if (!targetMode(aic, ai, chosen)) {
+            return forgeModes; // the model's mode has no usable target
         }
         List<AbilitySub> result = new ArrayList<>();
         result.add(chosen);
         return result; // the engine sorts this list, so it must be mutable
+    }
+
+    private static List<AbilitySub> routedModeList(AiController aic, Player ai, SpellAbility sa, List<AbilitySub> possible,
+                                                   int min, int num, boolean allowRepeat, List<AbilitySub> forgeModes) {
+        Card host = sa.getHostCard();
+        boolean forgeComplete = forgeModes != null && !forgeModes.isEmpty() && forgeModes.size() >= min;
+        List<AbilitySub> chosen = new ArrayList<>();
+        for (int i = 0; i < num; i++) {
+            List<AbilitySub> options = new ArrayList<>(possible);
+            if (!allowRepeat) {
+                options.removeAll(chosen);
+            }
+            if (options.isEmpty()) {
+                break;
+            }
+            List<String> labels = new ArrayList<>();
+            for (AbilitySub mode : options) {
+                labels.add(modeLabel(mode));
+            }
+            boolean optional = i >= min;
+            if (optional) {
+                labels.add("No more modes");
+            }
+            List<String> sofar = new ArrayList<>();
+            for (AbilitySub mode : chosen) {
+                sofar.add(modeLabel(mode));
+            }
+            int hint = forgeModes != null && i < forgeModes.size() ? options.indexOf(forgeModes.get(i)) : -1;
+            String question = "Choose mode " + (i + 1) + " of " + (min == num ? String.valueOf(num) : "up to " + num)
+                    + " for " + host.getName() + (allowRepeat ? " (the same mode can be chosen more than once)" : "")
+                    + (sofar.isEmpty() ? "" : ". Chosen so far: " + String.join("; ", sofar)) + ".";
+            int pick = LlmGate.askRouted(ai, "routed_mode", "choosing modes for " + host.getName(), question, labels,
+                    List.of(host), hint, "routed_mode:" + host.getId() + ":" + sa.getId() + ":" + i);
+            if (pick < 0) {
+                return forgeComplete ? forgeModes : chosen.size() >= min ? chosen : forgeModes;
+            }
+            if (pick >= options.size()) {
+                break; // no more modes
+            }
+            chosen.add(options.get(pick));
+        }
+        for (AbilitySub mode : new HashSet<>(chosen)) {
+            if (!targetMode(aic, ai, mode)) {
+                chosen.removeIf(m -> m == mode);
+            }
+        }
+        return chosen.size() >= Math.max(1, min) || !forgeComplete ? chosen : forgeModes;
+    }
+
+    /** Targets for a mode the model chose; false if it has no usable target. */
+    private static boolean targetMode(AiController aic, Player ai, AbilitySub mode) {
+        mode.setActivatingPlayer(ai);
+        if (!mode.usesTargeting()) {
+            return true;
+        }
+        mode.resetTargets();
+        return aic.doTrigger(mode, true) && mode.isTargetNumberValid();
     }
 
     // ------------------------------------------------------------------
@@ -1002,6 +1069,10 @@ public final class LlmAssist {
         GamePlanner.start(ai);
         int decision = LlmGate.gameMemory(ai, "mulligan-decisions");
         LlmGate.setGameMemory(ai, "mulligan-decisions", decision + 1);
+        if (decision == 0) {
+            // the first decision of the game: give a new deck's plan up to LLM_PLAN_WAIT_MS to arrive
+            GamePlanner.await(ai);
+        }
         // the first mulligan is free in multiplayer Commander
         boolean free = decision == 0 && ai.getGame().getPlayers().size() > 2;
         HandFacts facts = handFacts(ai, cardsToReturn, free);

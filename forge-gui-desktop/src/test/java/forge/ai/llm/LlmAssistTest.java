@@ -333,6 +333,41 @@ public class LlmAssistTest extends AITest {
         AssertJUnit.assertEquals(5, daretti.getCounters(CounterEnumType.LOYALTY));
     }
 
+    /**
+     * A routed spell with several modes gets them from the model, one at a time. In a test match a routed Fiery
+     * Confluence (three modes, repeats allowed) was cast with no modes: the standard AI found no set it liked.
+     */
+    @Test
+    public void modelPicksSeveralModes() throws Exception {
+        File dir = java.nio.file.Files.createTempDirectory("llm-plans").toFile();
+        System.setProperty("forge.llm.plans", dir.getAbsolutePath());
+        try {
+            FakeProvider provider = new FakeProvider(1); // cast it after combat; then "2 damage to each opponent" each time
+            Game game = setUpGame("DSeekPlan+JevAI", 13, provider);
+            Deck deck = ai.getRegisteredPlayer().getDeck();
+            deck.getOrCreate(DeckSection.Main).add(FModel.getMagicDb().getCommonCards().getCard("Fiery Confluence"));
+            java.nio.file.Files.writeString(new File(dir, "deck-" + GamePlanner.hash(deck) + ".json").toPath(),
+                    "{\"archetype\":\"Burn\",\"summary\":\"Burn.\",\"contextCards\":[{\"card\":\"Fiery Confluence\","
+                            + "\"risk\":\"modes\",\"guidance\":\"Pick modes for the board.\"}]}");
+            AssertJUnit.assertNotNull(GamePlanner.await(ai));
+
+            addCardToZone("Fiery Confluence", ai, ZoneType.Hand);
+            for (int i = 0; i < 4; i++) {
+                addCard("Mountain", ai);
+            }
+            int lifeA = opponentA.getLife(), lifeB = opponentB.getLife();
+
+            playUntilPhase(game, PhaseType.END_OF_TURN);
+
+            AssertJUnit.assertTrue("modes went to the model: " + provider.questions,
+                    provider.questions.stream().anyMatch(q -> q.startsWith("Choose mode 3 of 3 for Fiery Confluence")));
+            AssertJUnit.assertEquals(lifeA - 6, opponentA.getLife());
+            AssertJUnit.assertEquals(lifeB - 6, opponentB.getLife());
+        } finally {
+            System.clearProperty("forge.llm.plans");
+        }
+    }
+
     /** The model picks which free permanent Genesis Hydra puts onto the battlefield, not whether to take one. */
     @Test
     public void noChooseNothingUnlessTheChoiceIsTheJudgmentCall() {
