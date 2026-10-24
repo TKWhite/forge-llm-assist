@@ -10,6 +10,7 @@ import forge.ai.AiProps;
 import forge.ai.ComputerUtilCard;
 import forge.ai.SpellApiToAi;
 import forge.ai.ability.CannotPlayAi;
+import forge.game.CardTraitBase;
 import forge.game.ability.ApiType;
 import forge.game.card.Card;
 import forge.game.keyword.Keyword;
@@ -128,6 +129,14 @@ public final class RoutedCards {
         return !sa.getRestrictions().isSorcerySpeed();
     }
 
+    /**
+     * True for parts that come from a named keyword such as cascade. Card-specific "K:" lines like
+     * ETBReplacement parse as UNDEFINED and still count as the card's own text.
+     */
+    public static boolean isRulesKeyword(CardTraitBase part) {
+        return part.getKeyword() != null && part.getKeyword().getKeyword() != Keyword.UNDEFINED;
+    }
+
     /** Cards the standard AI can't play at all, so it will never propose them itself. */
     public static boolean isUnsupported(Card card) {
         return staticTags(card).contains(Tag.UNSUPPORTED);
@@ -155,12 +164,19 @@ public final class RoutedCards {
                 inspect(part, tags);
             }
         }
+        // keyword triggers and replacements (cascade, etc.) are rules the standard AI handles, so they don't tag the card
         for (Trigger t : card.getTriggers()) {
+            if (isRulesKeyword(t)) {
+                continue;
+            }
             for (SpellAbility part = t.getOverridingAbility(); part != null; part = part.getSubAbility()) {
                 inspect(part, tags);
             }
         }
         for (ReplacementEffect re : card.getReplacementEffects()) {
+            if (isRulesKeyword(re)) {
+                continue;
+            }
             if (re.hasParam("Optional")) {
                 tags.add(Tag.OPTIONAL_CHOICE);
             }

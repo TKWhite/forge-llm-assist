@@ -393,8 +393,10 @@ public class PlayerControllerAi extends PlayerController {
     @Override
     public boolean confirmAction(SpellAbility sa, PlayerActionConfirmMode mode, String message, List<String> options, Card cardToShow, Map<String, Object> params) {
         boolean forgeAnswer = getAi().confirmAction(sa, mode, message, params);
-        // rules prompts such as moving a commander to the command zone are never handed to the assist
-        if (sa == null || mode == PlayerActionConfirmMode.ChangeZoneToAltDestination) {
+        // rules prompts such as moving a commander to the command zone are never handed to the assist, nor are
+        // keyword prompts such as cascade's "cast it without paying its mana cost?"
+        if (sa == null || mode == PlayerActionConfirmMode.ChangeZoneToAltDestination
+                || RoutedCards.isRulesKeyword(sa)) {
             return forgeAnswer;
         }
         return LlmAssist.routedConfirm(player, sa.getHostCard(), message, forgeAnswer);

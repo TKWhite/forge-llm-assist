@@ -241,6 +241,8 @@ public class LlmAssistTest extends AITest {
         AssertJUnit.assertTrue(RoutedCards.classify(addCard("Hellkite Charger", ai)).contains(RoutedCards.Tag.EXTRA_COMBAT));
         AssertJUnit.assertTrue("plain mana rock", RoutedCards.classify(addCard("Sol Ring", ai)).isEmpty());
         AssertJUnit.assertTrue("plain land", RoutedCards.classify(addCard("Mountain", ai)).isEmpty());
+        // cascade's "you may cast it" is a keyword rule, not a judgement call on the card
+        AssertJUnit.assertTrue("cascade", RoutedCards.classify(addCardToZone("Bituminous Blast", ai, ZoneType.Hand)).isEmpty());
         AssertJUnit.assertTrue(LlmAssist.isRouted(ai, addCard("Cursed Mirror", ai).getFirstSpellAbility()));
     }
 
