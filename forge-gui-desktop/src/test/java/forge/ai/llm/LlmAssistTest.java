@@ -497,6 +497,48 @@ public class LlmAssistTest extends AITest {
                 .stream().anyMatch(e -> e.message().contains("Blaze") && e.message().contains("deals 6 damage")));
     }
 
+    /**
+     * When the standard AI proposes a routed card, the model must be clearly more confident in waiting to veto it.
+     * In test matches the model turned down three in four such proposals, many by a coin flip.
+     */
+    @Test
+    public void vetoNeedsAClearMargin() {
+        FakeProvider provider = new FakeProvider(1); // "hold it"
+        Game game = setUpGame("LlmAssisted", 13, provider);
+        Card gisa = addCard("Ghoulcaller Gisa", ai);
+        addCard("Grizzly Bears", ai);
+        SpellAbility ability = gisa.getSpellAbilities().stream().filter(sa -> !sa.isSpell()).findFirst().orElseThrow();
+        ability.setActivatingPlayer(ai);
+
+        provider.probabilities = new double[] {0.46, 0.54}; // leans to holding, not clearly (LLM_MIN_MARGIN_PCT=10)
+        AssertJUnit.assertTrue("a near coin flip doesn't veto", LlmAssist.confirmPlay(ai, ability));
+
+        game.getPhaseHandler().devModeSet(PhaseType.MAIN1, ai, 14);
+        provider.probabilities = new double[] {0.2, 0.8};
+        AssertJUnit.assertFalse("a clear preference does", LlmAssist.confirmPlay(ai, ability));
+    }
+
+    /** Questions about holding a card say what holding costs: unspent mana, low life, a late game. */
+    @Test
+    public void holdCostNotes() {
+        Game game = setUpGame("LlmAssisted", 13, new FakeProvider(0));
+        SpellAbility hellkite = addCardToZone("Shivan Dragon", ai, ZoneType.Hand).getFirstSpellAbility();
+        hellkite.setActivatingPlayer(ai);
+        AssertJUnit.assertEquals("no mana, healthy, round 5: nothing", "", LlmAssist.holdCost(ai, hellkite));
+
+        for (int i = 0; i < 3; i++) {
+            addCard("Mountain", ai);
+        }
+        AssertJUnit.assertTrue(LlmAssist.holdCost(ai, hellkite).contains("3 mana available and no instant-speed cards"));
+        addCardToZone("Lightning Bolt", ai, ZoneType.Hand);
+        AssertJUnit.assertFalse("an instant can use the mana later", LlmAssist.holdCost(ai, hellkite).contains("mana"));
+
+        ai.setLife(5, null);
+        AssertJUnit.assertTrue(LlmAssist.holdCost(ai, hellkite).contains("5 life and under real pressure"));
+        game.getPhaseHandler().devModeSet(PhaseType.MAIN1, ai, 30);
+        AssertJUnit.assertTrue(LlmAssist.holdCost(ai, hellkite).contains("late in the game"));
+    }
+
     /** The model picks which free permanent Genesis Hydra puts onto the battlefield, not whether to take one. */
     @Test
     public void noChooseNothingUnlessTheChoiceIsTheJudgmentCall() {

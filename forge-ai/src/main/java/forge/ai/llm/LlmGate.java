@@ -135,18 +135,30 @@ public final class LlmGate {
      */
     public static int ask(Player ai, AiProps hookProp, String hook, String activity, String question,
                           List<String> options, Collection<Card> focusCards, int forgeIndex, String cacheKey) {
-        return askInternal(ai, hookProp, hook, activity, question, options, focusCards, forgeIndex, cacheKey, false);
+        return askInternal(ai, hookProp, hook, activity, question, options, focusCards, forgeIndex, cacheKey, false, true);
     }
 
     /** Routed-card question: the model's answer stands (no margin check), no per-turn limit. */
     public static int askRouted(Player ai, String hook, String activity, String question,
                                 List<String> options, Collection<Card> focusCards, int forgeIndex, String cacheKey) {
-        return askInternal(ai, AiProps.LLM_HOOK_ROUTED, hook, activity, question, options, focusCards, forgeIndex, cacheKey, true);
+        return askInternal(ai, AiProps.LLM_HOOK_ROUTED, hook, activity, question, options, focusCards, forgeIndex, cacheKey,
+                true, false);
+    }
+
+    /**
+     * Routed-card question with a default the model must clearly beat (LLM_MIN_MARGIN_PCT), e.g. "use it" when the
+     * standard AI proposed the card or holding would waste mana; routed budget, no per-turn limit.
+     */
+    public static int askRoutedWithDefault(Player ai, String hook, String activity, String question,
+                                           List<String> options, Collection<Card> focusCards, int defaultIndex,
+                                           String cacheKey) {
+        return askInternal(ai, AiProps.LLM_HOOK_ROUTED, hook, activity, question, options, focusCards, defaultIndex,
+                cacheKey, true, true);
     }
 
     private static int askInternal(Player ai, AiProps hookProp, String hook, String activity, String question,
                                    List<String> options, Collection<Card> focusCards, int forgeIndex, String cacheKey,
-                                   boolean authoritative) {
+                                   boolean routedBudget, boolean marginCheck) {
         int hit = cached(ai, cacheKey);
         if (hit >= 0 && hit < options.size()) {
             return hit;
@@ -157,7 +169,7 @@ public final class LlmGate {
         Game game = ai.getGame();
         Budget b = budget(game);
         synchronized (b) {
-            if (authoritative) {
+            if (routedBudget) {
                 b.routedCalls.merge(ai.getName(), 1, Integer::sum);
             } else {
                 b.calls.merge(ai.getName(), 1, Integer::sum);
@@ -194,7 +206,7 @@ public final class LlmGate {
             return -1;
         }
         int chosen = answer.index();
-        boolean overruled = !authoritative && forgeIndex >= 0 && chosen != forgeIndex && !overrule(ai, answer, forgeIndex);
+        boolean overruled = marginCheck && forgeIndex >= 0 && chosen != forgeIndex && !overrule(ai, answer, forgeIndex);
         if (overruled) {
             chosen = forgeIndex;
         }

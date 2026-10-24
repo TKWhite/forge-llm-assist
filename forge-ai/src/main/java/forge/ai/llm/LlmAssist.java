@@ -19,6 +19,7 @@ import forge.ai.AiProfileUtil;
 import forge.ai.AiProps;
 import forge.ai.ComputerUtilCard;
 import forge.ai.ComputerUtilCost;
+import forge.ai.ComputerUtilMana;
 import forge.card.MagicColor;
 import forge.game.Game;
 import forge.game.GameLogEntryType;
@@ -26,6 +27,7 @@ import forge.game.GameEntity;
 import forge.game.ability.ApiType;
 import forge.game.card.Card;
 import forge.game.card.CounterEnumType;
+import forge.game.keyword.Keyword;
 import forge.game.phase.PhaseHandler;
 import forge.game.phase.PhaseType;
 import forge.game.player.Player;
@@ -182,13 +184,18 @@ public final class LlmAssist {
             if (decided < 0) {
                 String what = playLabel(sa) + (xValue > 0 ? " with X=" + xValue : "");
                 int held = holdTurns(ai, host);
+                String cost = holdCost(ai, sa);
                 String question = "Should you " + what + "?" + notYourTurn + " This card needs judgment: "
                         + RoutedCards.guidance(ai, host) + "."
                         + (held > 0 ? " You have already held it for " + held + (held == 1 ? " turn" : " turns")
-                        + "; a card that is never used does nothing." : "");
+                        + "; a card that is never used does nothing." : "") + cost;
                 List<String> options = main1 ? MAIN1_OPTIONS : NOW_OPTIONS;
-                int pick = LlmGate.askRouted(ai, "routed", "deciding whether to " + what, question,
-                        options, List.of(host), -1, decisionKey + ":q:" + (main1 ? "main1" : window));
+                String qKey = decisionKey + ":q:" + (main1 ? "main1" : window);
+                // when holding costs something, using it this turn is the default the model must clearly beat
+                int pick = cost.isEmpty()
+                        ? LlmGate.askRouted(ai, "routed", "deciding whether to " + what, question, options, List.of(host), -1, qKey)
+                        : LlmGate.askRoutedWithDefault(ai, "routed", "deciding whether to " + what, question, options,
+                                List.of(host), main1 ? AFTER_COMBAT : 0, qKey);
                 if (pick < 0) {
                     continue; // no answer: the card stays unused this phase
                 }
@@ -213,6 +220,43 @@ public final class LlmAssist {
             }
         }
         return null;
+    }
+
+    /** Life at or below this fraction of the starting total counts as under pressure. */
+    private static final int LOW_LIFE_DIVISOR = 3;
+    /** From this round on the game is late: a card held for a better moment may never get one. */
+    private static final int LATE_ROUND = 8;
+
+    /**
+     * Why holding this card has a cost right now, for the question; empty if it has none. Unspent mana (with no
+     * instant-speed card in hand to use it on, or at an opponent's end step where it's about to untap anyway),
+     * low life and a late game all make "wait" more expensive. When any applies, using the card is the default.
+     */
+    static String holdCost(Player ai, SpellAbility sa) {
+        List<String> notes = new ArrayList<>();
+        Game game = ai.getGame();
+        PhaseHandler ph = game.getPhaseHandler();
+        int mana = ComputerUtilMana.getAvailableManaEstimate(ai, false);
+        if (mana > 0 && ph.getPhase() != null) {
+            boolean ownMain = ph.isPlayerTurn(ai) && ph.getPhase().isMain();
+            boolean lastWindow = !ph.isPlayerTurn(ai) && ph.is(PhaseType.END_OF_TURN);
+            boolean otherInstants = ai.getCardsIn(ZoneType.Hand).anyMatch(c -> c != sa.getHostCard()
+                    && !c.isLand() && (c.isInstant() || c.hasKeyword(Keyword.FLASH)));
+            if (ownMain && !otherInstants) {
+                notes.add("you have " + mana + " mana available and no instant-speed cards in hand, so mana you don't"
+                        + " spend this turn is wasted");
+            } else if (lastWindow) {
+                notes.add("your " + mana + " untapped mana is wasted if not used before your untap step");
+            }
+        }
+        if (ai.getLife() <= ai.getStartingLife() / LOW_LIFE_DIVISOR) {
+            notes.add("you are at " + ai.getLife() + " life and under real pressure");
+        }
+        int round = StateSerializer.round(game);
+        if (round >= LATE_ROUND) {
+            notes.add("it is round " + round + ", late in the game, so a card held for a better moment may never be cast");
+        }
+        return notes.isEmpty() ? "" : " Holding has a cost: " + String.join("; ", notes) + ".";
     }
 
     private static final int LOYALTY_NONE = Integer.MAX_VALUE, LOYALTY_AFTER_COMBAT = Integer.MAX_VALUE - 1;
@@ -967,9 +1011,10 @@ public final class LlmAssist {
             SpellAbility top = game.getStack().isEmpty() ? null : game.getStack().peekAbility();
             String what = playLabel(sa);
             String context = top == null || top.getHostCard() == null ? "" : " in response to " + top.getHostCard().getName();
-            int pick = LlmGate.askRouted(ai, "routed", "deciding whether to " + what + context,
+            // the standard AI's "use it" stands unless the model is clearly more confident it should wait
+            int pick = LlmGate.askRoutedWithDefault(ai, "routed", "deciding whether to " + what + context,
                     "The standard AI wants to " + what + " now" + context + ". This card needs judgment: "
-                            + RoutedCards.guidance(ai, host) + ". Should you?",
+                            + RoutedCards.guidance(ai, host) + "." + holdCost(ai, sa) + " Should you?",
                     NOW_OPTIONS, List.of(host), 0,
                     // once per card per turn, plus once per spell it could respond to (the standard AI proposes
                     // instant-speed cards at every step, so a per-step key would ask over and over)
@@ -982,7 +1027,7 @@ public final class LlmAssist {
         if (isWipe(sa) && LlmGate.mayAsk(ai, AiProps.LLM_HOOK_WIPE)) {
             int pick = LlmGate.ask(ai, AiProps.LLM_HOOK_WIPE, "wipe", "deciding whether to " + playLabel(sa) + " now",
                     "The standard AI wants to " + playLabel(sa) + " now, which removes creatures or permanents en masse."
-                            + " Considering everyone's board (including yours), should you do it now or wait?",
+                            + " Considering everyone's board (including yours), should you do it now or wait?" + holdCost(ai, sa),
                     CONFIRM_OPTIONS, List.of(host), 0, "wipe:" + host.getId());
             return pick != 1;
         }
@@ -1002,7 +1047,7 @@ public final class LlmAssist {
                 "The standard AI wants to cast " + host.getName() + " now. Your game plan says to hold it until: "
                         + castWhen + "." + (alreadyHeld > 0 ? " You have already held it for " + alreadyHeld
                         + (alreadyHeld == 1 ? " turn" : " turns") + "; a payoff that is never cast does nothing." : "")
-                        + " Is now the right moment?",
+                        + holdCost(ai, sa) + " Is now the right moment?",
                 CONFIRM_OPTIONS, List.of(host), 0, key);
         if (pick == 1 && !askedThisTurn) {
             holdCounts.computeIfAbsent(ai.getGame(), g -> new HashMap<>()).merge(host.getId(), 1, Integer::sum);
