@@ -22,7 +22,7 @@ import forge.game.trigger.Trigger;
 
 /**
  * Decides which cards the standard AI can't be trusted with. Those cards are "routed": the model
- * decides when to use them and makes their choices, instead of the standard AI.
+ * makes their choices, and for timing-sensitive ones also decides when to use them, instead of the standard AI.
  * <p>
  * Two sources, merged:
  * <ul>
@@ -30,24 +30,41 @@ import forge.game.trigger.Trigger;
  * <li>the game plan's {@code contextCards}: cards the planner flagged as dual-use or timing-sensitive,
  * each with one line of guidance.</li>
  * </ul>
+ * Signals from named keywords (cascade, suspend, madness, dredge...) are rules the standard AI already
+ * handles and never route a card.
  */
 public final class RoutedCards {
 
     public enum Tag {
-        UNSUPPORTED("the standard AI can't play this card at all"),
-        AI_UNSURE("the standard AI is known to play this card poorly"),
-        TEMPORARY("part of its effect only lasts until end of turn, so timing matters (e.g. a hasted copy should be made before combat)"),
-        OPTIONAL_CHOICE("it has an optional choice when it enters or resolves; declining can be correct"),
-        MODAL("it has several modes; pick the one that fits the board"),
-        X_COST("it has an X cost; casting it too early wastes it"),
-        EXTRA_COMBAT("it adds a combat phase; best when attackers are ready");
+        UNSUPPORTED(true, "the standard AI can't play this card at all"),
+        AI_UNSURE(false, "the standard AI is known to play this card poorly"),
+        TEMPORARY(true, "part of its effect only lasts until end of turn, so timing matters (e.g. a hasted copy should be made before combat)"),
+        OPTIONAL_CHOICE(false, "it has an optional choice that depends on the board (what to copy, take, sacrifice or discard)"),
+        MODAL(false, "it has several modes; pick the one that fits the board"),
+        X_COST(true, "it has an X cost; casting it too early wastes it"),
+        EXTRA_COMBAT(true, "it adds a combat phase; best when attackers are ready");
 
+        /**
+         * True when the signal is about when to use the card, so the model also takes over its timing. The others
+         * are about choices made as it resolves: the standard AI still decides when to cast it.
+         */
+        public final boolean timing;
         public final String description;
 
-        Tag(String description) {
+        Tag(boolean timing, String description) {
+            this.timing = timing;
             this.description = description;
         }
     }
+
+    /**
+     * Optional effects whose "yes or no" depends on the board. Other optional effects (free casts, "look at the
+     * top cards and take one", "you may put it onto the battlefield", mill, scry) are nearly always taken, and the
+     * standard AI decides them well.
+     */
+    private static final EnumSet<ApiType> JUDGMENT_OPTIONAL = EnumSet.of(ApiType.Clone, ApiType.Animate,
+            ApiType.GainControl, ApiType.ExchangeControl, ApiType.ChangeTargets, ApiType.CopySpellAbility,
+            ApiType.Sacrifice, ApiType.Discard);
 
     /** script signals are the same for every copy of a card, so cache by name */
     private static final Map<String, EnumSet<Tag>> tagCache = new ConcurrentHashMap<>();
@@ -59,15 +76,33 @@ public final class RoutedCards {
         return LlmGate.hookEnabled(ai, AiProps.LLM_HOOK_ROUTED);
     }
 
-    /** True if the model, not the standard AI, should decide how and when to use this ability. */
+    /**
+     * True if the model, not the standard AI, should decide when to use this spell or ability. Spells go by the
+     * whole card (what it does on entering counts); activated abilities go by their own text, so a card with one
+     * tricky ability doesn't take its equip, crew or other abilities away from the standard AI.
+     */
     public static boolean isRouted(Player ai, SpellAbility sa) {
         if (sa == null || sa.isManaAbility() || sa.isLandAbility() || sa.getHostCard() == null) {
             return false;
         }
-        return isRouted(ai, sa.getHostCard());
+        Card card = sa.getHostCard();
+        if (!enabled(ai) || card.isLand() && !card.isCreature() && staticTags(card).isEmpty()) {
+            return false;
+        }
+        if (planFlagged(ai, card)) {
+            return true;
+        }
+        EnumSet<Tag> tags = sa.isSpell() ? staticTags(card) : abilityTags(sa);
+        for (Tag t : tags) {
+            if (t.timing) {
+                return true;
+            }
+        }
+        return false;
     }
 
-    public static boolean isRouted(Player ai, Card card) {
+    /** True if the model makes the choices while this card resolves (modes, what to copy, optional effects). */
+    public static boolean routesChoices(Player ai, Card card) {
         if (card == null || card.isLand() && !card.isCreature() && staticTags(card).isEmpty()) {
             return false;
         }
@@ -79,11 +114,47 @@ public final class RoutedCards {
         // "AI unsure" cards are still played by the standard AI, just not always well; on their own they only
         // add guidance, since routing them would take away the standard AI's responses (protection spells etc.)
         tags.remove(Tag.AI_UNSURE);
-        if (!tags.isEmpty()) {
-            return true;
-        }
+        return !tags.isEmpty() || planFlagged(ai, card);
+    }
+
+    private static boolean planFlagged(Player ai, Card card) {
         GamePlan plan = GamePlanner.current(ai);
         return plan != null && plan.contextGuidance(card.getName()) != null;
+    }
+
+    /** Signals in one activated ability's own text, plus the card being unplayable by the standard AI. */
+    static EnumSet<Tag> abilityTags(SpellAbility sa) {
+        EnumSet<Tag> tags = EnumSet.noneOf(Tag.class);
+        if (isUnsupported(sa.getHostCard())) {
+            tags.add(Tag.UNSUPPORTED);
+        }
+        if (isRulesKeyword(sa)) {
+            return tags;
+        }
+        if (sa.getApi() != null && SpellApiToAi.Converter.get(sa) instanceof CannotPlayAi) {
+            tags.add(Tag.UNSUPPORTED);
+        }
+        if (sa.getPayCosts() != null && sa.getPayCosts().getTotalMana().countX() > 0) {
+            tags.add(Tag.X_COST);
+        }
+        for (SpellAbility part = sa; part != null; part = part.getSubAbility()) {
+            inspect(part, tags);
+        }
+        return tags;
+    }
+
+    /**
+     * Whether a "you may" question while a routed card resolves should go to the model. Free casts and other
+     * optional effects that are nearly always taken stay with the standard AI.
+     */
+    public static boolean isJudgmentConfirm(SpellAbility sa) {
+        if (sa == null || sa.getApi() == null || isRulesKeyword(sa)) {
+            return false;
+        }
+        if (sa.getApi() == ApiType.Play && sa.hasParam("WithoutManaCost")) {
+            return false;
+        }
+        return JUDGMENT_OPTIONAL.contains(sa.getApi()) || isUnsupported(sa.getHostCard());
     }
 
     /** Why this card is routed, for the model's prompt. */
@@ -154,7 +225,7 @@ public final class RoutedCards {
             tags.add(Tag.X_COST);
         }
         for (SpellAbility sa : card.getSpellAbilities()) {
-            if (sa.isManaAbility()) {
+            if (sa.isManaAbility() || isRulesKeyword(sa)) {
                 continue;
             }
             if (sa.getApi() != null && SpellApiToAi.Converter.get(sa) instanceof CannotPlayAi) {
@@ -211,7 +282,8 @@ public final class RoutedCards {
         if (api == ApiType.AddPhase && part.getParamOrDefault("ExtraPhase", "").contains("Combat")) {
             tags.add(Tag.EXTRA_COMBAT);
         }
-        if (part.hasParam("ChoiceOptional") || (part instanceof AbilitySub && part.hasParam("Optional"))) {
+        if (JUDGMENT_OPTIONAL.contains(api)
+                && (part.hasParam("ChoiceOptional") || (part instanceof AbilitySub && part.hasParam("Optional")))) {
             tags.add(Tag.OPTIONAL_CHOICE);
         }
     }

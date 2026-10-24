@@ -342,7 +342,7 @@ public class PlayerControllerAi extends PlayerController {
             reveal(delayedReveal);
         }
         T choice = SpellApiToAi.Converter.get(sa).chooseSingleEntity(player, sa, optionList, isOptional, targetedPlayer, params);
-        if (sa != null && RoutedCards.isRouted(player, sa.getHostCard())) {
+        if (sa != null && RoutedCards.routesChoices(player, sa.getHostCard())) {
             return LlmAssist.routedChoice(player, sa, optionList, choice, isOptional);
         }
         return LlmAssist.refineEntity(player, sa, optionList, choice);
@@ -394,9 +394,9 @@ public class PlayerControllerAi extends PlayerController {
     public boolean confirmAction(SpellAbility sa, PlayerActionConfirmMode mode, String message, List<String> options, Card cardToShow, Map<String, Object> params) {
         boolean forgeAnswer = getAi().confirmAction(sa, mode, message, params);
         // rules prompts such as moving a commander to the command zone are never handed to the assist, nor are
-        // keyword prompts such as cascade's "cast it without paying its mana cost?"
+        // keyword prompts (cascade's free cast) or optional effects that are nearly always taken
         if (sa == null || mode == PlayerActionConfirmMode.ChangeZoneToAltDestination
-                || RoutedCards.isRulesKeyword(sa)) {
+                || !RoutedCards.isJudgmentConfirm(sa)) {
             return forgeAnswer;
         }
         return LlmAssist.routedConfirm(player, sa.getHostCard(), message, forgeAnswer);

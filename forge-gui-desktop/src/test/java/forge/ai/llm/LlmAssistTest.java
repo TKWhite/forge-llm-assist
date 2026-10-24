@@ -17,9 +17,11 @@ import forge.deck.DeckSection;
 import forge.item.PaperCard;
 import forge.model.FModel;
 import forge.game.Game;
+import forge.game.ability.ApiType;
 import forge.game.card.Card;
 import forge.game.phase.PhaseType;
 import forge.game.player.Player;
+import forge.game.spellability.SpellAbility;
 import forge.game.zone.ZoneType;
 
 public class LlmAssistTest extends AITest {
@@ -244,6 +246,34 @@ public class LlmAssistTest extends AITest {
         // cascade's "you may cast it" is a keyword rule, not a judgement call on the card
         AssertJUnit.assertTrue("cascade", RoutedCards.classify(addCardToZone("Bituminous Blast", ai, ZoneType.Hand)).isEmpty());
         AssertJUnit.assertTrue(LlmAssist.isRouted(ai, addCard("Cursed Mirror", ai).getFirstSpellAbility()));
+    }
+
+    /**
+     * Only timing signals take a card's timing from the standard AI; modes and optional choices are made by the
+     * model as the card resolves. Activated abilities are routed one by one.
+     */
+    @Test
+    public void routesTimingOnlyForTimingSignals() {
+        setUpGame("LlmAssisted", 13, new FakeProvider(0));
+
+        Card channeler = addCardToZone("Aether Channeler", ai, ZoneType.Hand);
+        AssertJUnit.assertTrue("modal ETB: the model picks the mode", RoutedCards.routesChoices(ai, channeler));
+        AssertJUnit.assertFalse("modal ETB: the standard AI still casts it", LlmAssist.isRouted(ai, channeler.getFirstSpellAbility()));
+
+        // "you may cast them without paying their mana cost" is nearly always right; no routing
+        AssertJUnit.assertTrue(RoutedCards.classify(addCardToZone("Collected Conjuring", ai, ZoneType.Hand)).isEmpty());
+
+        Card oko = addCard("Oko, the Trickster", ai);
+        SpellAbility counters = null, copy = null;
+        for (SpellAbility sa : oko.getSpellAbilities()) {
+            if (sa.getApi() == ApiType.PutCounter) {
+                counters = sa;
+            } else if (sa.getApi() == ApiType.Clone) {
+                copy = sa;
+            }
+        }
+        AssertJUnit.assertTrue("until-end-of-turn copy ability", LlmAssist.isRouted(ai, copy));
+        AssertJUnit.assertFalse("plain +1 stays with the standard AI", LlmAssist.isRouted(ai, counters));
     }
 
     @Test

@@ -137,8 +137,7 @@ public final class LlmAssist {
                 decided = go ? USE_NOW : LATER;
             }
             if (decided < 0) {
-                String what = (sa.isSpell() ? "cast " + host.getName() : "activate " + host.getName() + " (" + sa + ")")
-                        + (xValue > 0 ? " with X=" + xValue : "");
+                String what = playLabel(sa) + (xValue > 0 ? " with X=" + xValue : "");
                 int held = holdTurns(ai, host);
                 String question = "Should you " + what + "? This card needs judgment: " + RoutedCards.guidance(ai, host) + "."
                         + (held > 0 ? " You have already held it for " + held + (held == 1 ? " turn" : " turns")
@@ -166,6 +165,29 @@ public final class LlmAssist {
             }
         }
         return null;
+    }
+
+    /**
+     * "cast X" / "activate X (...)", naming the way it is cast when there are several (Dash, Evoke, Flashback, the
+     * adventure half...), since the model is asked about each of them separately.
+     */
+    static String playLabel(SpellAbility sa) {
+        Card host = sa.getHostCard();
+        if (!sa.isSpell()) {
+            return "activate " + host.getName() + " (" + sa + ")";
+        }
+        String name = sa.getCardState() == null ? host.getName() : sa.getCardState().getName();
+        StringBuilder s = new StringBuilder("cast ").append(name);
+        if (!name.equals(host.getName())) {
+            s.append(sa.isAdventure() ? " (the adventure of " : " (the other half of ").append(host.getName()).append(')');
+        }
+        if (sa.getAlternativeCost() != null) {
+            s.append(" for its ").append(sa.getAlternativeCost()).append(" cost");
+        }
+        if (host.getZone() != null && !host.isInZone(ZoneType.Hand) && !host.isInZone(ZoneType.Command)) {
+            s.append(" from your ").append(host.getZone().getZoneType().name().toLowerCase());
+        }
+        return s.toString();
     }
 
     /** Reactive routed cards come up at every opportunity; questions per card per turn are capped at this. */
@@ -264,7 +286,7 @@ public final class LlmAssist {
      */
     public static <T extends GameEntity> T routedChoice(Player ai, SpellAbility sa, Iterable<T> options, T forgePick,
                                                         boolean isOptional) {
-        if (sa == null || sa.getHostCard() == null || !RoutedCards.isRouted(ai, sa.getHostCard())
+        if (sa == null || sa.getHostCard() == null || !RoutedCards.routesChoices(ai, sa.getHostCard())
                 || !LlmGate.mayAsk(ai, AiProps.LLM_HOOK_ROUTED)) {
             return forgePick;
         }
@@ -303,7 +325,7 @@ public final class LlmAssist {
      * as a copy...") and "you may" effects.
      */
     public static boolean routedConfirm(Player ai, Card host, String question, boolean forgeAnswer) {
-        if (host == null || !RoutedCards.isRouted(ai, host) || !LlmGate.mayAsk(ai, AiProps.LLM_HOOK_ROUTED)) {
+        if (host == null || !RoutedCards.routesChoices(ai, host) || !LlmGate.mayAsk(ai, AiProps.LLM_HOOK_ROUTED)) {
             return forgeAnswer;
         }
         String q = question == null || question.isBlank() ? "Do you want to use the optional effect?" : question;
@@ -317,7 +339,7 @@ public final class LlmAssist {
     /** Mode choice for routed modal cards (single-mode choices); targets for a switched mode are re-chosen. */
     public static List<AbilitySub> routedModes(AiController aic, Player ai, SpellAbility sa, List<AbilitySub> possible,
                                                int num, List<AbilitySub> forgeModes) {
-        if (num != 1 || possible.size() < 2 || sa.getHostCard() == null || !RoutedCards.isRouted(ai, sa.getHostCard())
+        if (num != 1 || possible.size() < 2 || sa.getHostCard() == null || !RoutedCards.routesChoices(ai, sa.getHostCard())
                 || !LlmGate.mayAsk(ai, AiProps.LLM_HOOK_ROUTED)) {
             return forgeModes;
         }
@@ -638,7 +660,7 @@ public final class LlmAssist {
             }
             Game game = ai.getGame();
             SpellAbility top = game.getStack().isEmpty() ? null : game.getStack().peekAbility();
-            String what = sa.isSpell() ? "cast " + host.getName() : "activate " + host.getName() + " (" + sa + ")";
+            String what = playLabel(sa);
             String context = top == null || top.getHostCard() == null ? "" : " in response to " + top.getHostCard().getName();
             int pick = LlmGate.askRouted(ai, "routed", "deciding whether to " + what + context,
                     "The standard AI wants to " + what + " now" + context + ". This card needs judgment: "
